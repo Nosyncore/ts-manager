@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import threading
 import time
+from dataclasses import dataclass
 
 import pytest
 
@@ -137,18 +137,61 @@ def test_reconnect_after_own_agents_are_killed(remote_layout: RemoteLayout, reco
     record_property("recovery_s", round(recovery, 1))
 
 
-def _ps(lay, pc) -> list[str]:
-    """Agentes ``mutagen-agent synchronizer`` (sem o ``sh -c`` que os inicia).
+@dataclass(frozen=True)
+class AgentStat:
+    cpu_s: float  # utime + stime acumulados
+    rss_kb: int   # VmRSS
+    hwm_kb: int   # VmHWM: pico de RSS registrado pelo kernel
+
+
+# Lê /proc dos agentes da própria conta. O padrão "[t]" impede que o pgrep case com a linha
+# de comando deste script.
+_AGENTS_SCRIPT = r"""
+echo "tck $(getconf CLK_TCK)"
+for p in $(pgrep -u "$(id -u)" -f 'mutagen-agen[t] synchronizer'); do
+  s=$(sed 's/^.*) //' "/proc/$p/stat" 2>/dev/null) || continue
+  set -- $s
+  rss=$(awk '/^VmRSS:/{print $2}' "/proc/$p/status" 2>/dev/null)
+  hwm=$(awk '/^VmHWM:/{print $2}' "/proc/$p/status" 2>/dev/null)
+  cmd=$(tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null)
+  printf 'p\t%s\t%s\t%s\t%s\t%s\n' "$p" "$((${12} + ${13}))" "${rss:-0}" "${hwm:-0}" "$cmd"
+done
+"""
+
+
+def _agents(lay, pc) -> dict[tuple[str, int], AgentStat]:
+    """Agentes ``mutagen-agent synchronizer`` da conta do PC (sem o ``sh -c`` que os inicia).
 
     Filtra pelos argumentos, não pelo nome do processo: sob emulação QEMU (ensaio no
-    contêiner) o nome é ``qemu-aarch64``.
+    contêiner) o nome é ``qemu-aarch64``. CPU em segundos a partir de ``/proc/<pid>/stat``:
+    ``ps pcpu`` é a média desde o início do processo e não mede uma janela.
     """
-    out = lay.sh(pc, "ps -eo user=,pcpu=,rss=,etime=,args=", check=False).stdout
-    rows = []
-    for ln in out.splitlines():
-        if "mutagen-agent synchronizer" in ln and " sh -c " not in f" {ln} ":
-            rows.append(" ".join(ln.split()[:4]))
-    return rows
+    tck = 100
+    out: dict[tuple[str, int], AgentStat] = {}
+    for ln in lay.sh(pc, _AGENTS_SCRIPT).stdout.splitlines():
+        if ln.startswith("tck "):
+            tck = int(ln.split()[1])
+            continue
+        if not ln.startswith("p\t"):
+            continue
+        _, pid, ticks, rss, hwm, cmd = ln.split("\t", 5)
+        if " sh -c " in f" {cmd} ":
+            continue
+        out[(pc.name, int(pid))] = AgentStat(int(ticks) / tck, int(rss), int(hwm))
+    return out
+
+
+def _snapshot(lay) -> dict[tuple[str, int], AgentStat]:
+    return {**_agents(lay, lay.a), **_agents(lay, lay.b)}
+
+
+def _cpu_delta(before, after) -> float:
+    assert before.keys() == after.keys(), "agentes reiniciaram durante a medição"
+    return sum(after[k].cpu_s - before[k].cpu_s for k in before)
+
+
+IDLE_WINDOW_S = 30.0
+LOAD_FILES = 300
 
 
 def test_agent_resource_usage(remote_layout: RemoteLayout, record_property):
@@ -157,38 +200,36 @@ def test_agent_resource_usage(remote_layout: RemoteLayout, record_property):
     for pc in (a, b):
         up_pc(pc)
     time.sleep(15)
-    idle = _ps(lay, a)
-    print(f"\nV4 repouso (usuário %cpu rss_kB etime): {idle}")
 
-    for i in range(300):
+    # repouso: CPU consumida numa janela fixa, 4 sessões em watching
+    s0, t0 = _snapshot(lay), time.monotonic()
+    assert len(s0) == 4, s0  # 4 sessões -> 4 agentes (2 por conta)
+    time.sleep(IDLE_WINDOW_S)
+    s1, t1 = _snapshot(lay), time.monotonic()
+    idle_cpu = _cpu_delta(s0, s1)
+    idle_pct = 100 * idle_cpu / (t1 - t0)
+    idle_rss = sorted(v.rss_kb for v in s1.values())
+    print(f"\nV4 repouso ({t1 - t0:.0f}s): CPU agentes={idle_cpu:.2f}s "
+          f"({idle_pct:.2f}% de 1 vCPU); "
+          f"RSS kB={idle_rss} (total {sum(idle_rss) / 1024:.1f} MB)")
+
+    # carga: escrita + flush do upload; CPU por diferença e pico de RSS pelo VmHWM
+    t2 = time.monotonic()
+    for i in range(LOAD_FILES):
         write(a.work / "data" / "carga" / f"f{i:03}.lua", f"return {i}\n" * 50)
-    samples: list[list[str]] = []
-    done = threading.Event()
+    a.tsm("flush", "--role", "upload")
+    s2, t3 = _snapshot(lay), time.monotonic()
+    load_cpu = _cpu_delta(s1, s2)
+    load_pct = 100 * load_cpu / (t3 - t2)
+    hwm = sorted(v.hwm_kb for v in s2.values())
+    print(f"carga: {LOAD_FILES} arquivos em {t3 - t2:.1f}s; CPU agentes={load_cpu:.2f}s "
+          f"({load_pct:.1f}% de 1 vCPU em média); pico RSS (VmHWM) kB={hwm}")
 
-    def sample() -> None:
-        while not done.is_set():
-            samples.append(_ps(lay, b))
-            time.sleep(1)
-
-    th = threading.Thread(target=sample, daemon=True)
-    th.start()
-    t0 = time.monotonic()
-    try:
-        a.tsm("flush", "--role", "upload")
-    finally:
-        done.set()
-        th.join(timeout=30)
-    elapsed = time.monotonic() - t0
-
-    def peak(rows: list[list[str]]) -> tuple[float, int]:
-        cpu = max((float(r.split()[1]) for s in rows for r in s), default=0.0)
-        rss = max((int(r.split()[2]) for s in rows for r in s), default=0)
-        return cpu, rss
-
-    cpu, rss = peak([*samples, idle])
-    print(f"carga: 300 arquivos em {elapsed:.1f}s; pico %cpu={cpu} rss={rss} kB; "
-          f"amostras={len(samples)}")
-    record_property("idle", idle)
-    record_property("peak_cpu", cpu)
-    record_property("peak_rss_kb", rss)
-    assert len(idle) >= 4  # 4 sessões -> 4 agentes (2 por conta)
+    record_property("idle_window_s", round(t1 - t0, 1))
+    record_property("idle_cpu_s", round(idle_cpu, 2))
+    record_property("idle_cpu_pct_1vcpu", round(idle_pct, 2))
+    record_property("idle_rss_kb", idle_rss)
+    record_property("load_elapsed_s", round(t3 - t2, 1))
+    record_property("load_cpu_s", round(load_cpu, 2))
+    record_property("load_cpu_pct_1vcpu", round(load_pct, 1))
+    record_property("peak_rss_kb", hwm)
