@@ -1,0 +1,56 @@
+[
+  {
+    "identifier": "sync_9YhI586FvttkVUk6J1wsCAMuybXGLCNsOuAIltOaLR9",
+    "version": 1,
+    "creationTime": "2026-11-26T05:58:44.0342163Z",
+    "creatingVersion": "0.18.1",
+    "alpha": {
+      "protocol": "local",
+      "path": "C:\\tsm-fixture\\a",
+      "ignore": {},
+      "symlink": {},
+      "watch": {},
+      "permissions": {},
+      "compression": {},
+      "connected": true,
+      "scanned": true,
+      "directories": 1
+    },
+    "beta": {
+      "protocol": "local",
+      "path": "C:\\tsm-fixture\\b",
+      "ignore": {},
+      "symlink": {},
+      "watch": {},
+      "permissions": {},
+      "compression": {},
+      "connected": true,
+      "scanned": true,
+      "directories": 2,
+      "files": 2,
+      "totalFileSize": 5
+    },
+    "mode": "one-way-replica",
+    "ignore": {
+      "syntax": "mutagen",
+      "paths": [
+        "*.tmp"
+      ],
+      "vcs": true
+    },
+    "symlink": {
+      "mode": "ignore"
+    },
+    "watch": {},
+    "permissions": {},
+    "compression": {},
+    "name": "probe-up",
+    "labels": {
+      "tsm-managed": "true",
+      "tsm-role": "upload"
+    },
+    "paused": false,
+    "status": "halted-on-root-emptied",
+    "successfulCycles": 4
+  }
+]

@@ -1,0 +1,85 @@
+[
+  {
+    "identifier": "sync_HEa519etw25PkII3zibzqFp1jPEdlD75FaEGPILmqNO",
+    "version": 1,
+    "creationTime": "2026-11-26T06:21:53.5101626Z",
+    "creatingVersion": "0.18.1",
+    "alpha": {
+      "protocol": "local",
+      "path": "C:\\tsm-fixture\\pcA\\work",
+      "ignore": {},
+      "symlink": {},
+      "watch": {},
+      "permissions": {},
+      "compression": {},
+      "connected": true,
+      "scanned": true,
+      "directories": 3,
+      "files": 4,
+      "totalFileSize": 1423
+    },
+    "beta": {
+      "protocol": "ssh",
+      "host": "tsm-test-a",
+      "path": "/srv/ts/projects/demo/workspaces/dev-a",
+      "ignore": {},
+      "symlink": {},
+      "watch": {},
+      "permissions": {
+        "defaultFileMode": "0640",
+        "defaultDirectoryMode": "0750"
+      },
+      "compression": {},
+      "connected": true,
+      "scanned": true,
+      "directories": 3,
+      "files": 4,
+      "totalFileSize": 1423
+    },
+    "mode": "one-way-replica",
+    "ignore": {
+      "syntax": "mutagen",
+      "paths": [
+        ".env",
+        ".env.*",
+        "*.pem",
+        "*.key",
+        "id_rsa*",
+        "id_ed25519*",
+        "*.log",
+        "logs/",
+        "build/",
+        "dist/",
+        "__pycache__/",
+        "*.pyc",
+        ".cache/",
+        "node_modules/",
+        "*.tmp",
+        "*.swp",
+        "*~",
+        ".DS_Store",
+        "Thumbs.db",
+        "desktop.ini",
+        ".vscode/",
+        ".idea/"
+      ],
+      "vcs": true
+    },
+    "symlink": {
+      "mode": "ignore"
+    },
+    "watch": {},
+    "permissions": {},
+    "compression": {},
+    "name": "tsm-demo-pca-up",
+    "labels": {
+      "tsm-binding": "demo-pca",
+      "tsm-managed": "true",
+      "tsm-role": "upload",
+      "tsm-spec": "9cfc9590bcb9"
+    },
+    "paused": false,
+    "status": "watching",
+    "successfulCycles": 4
+  }
+]

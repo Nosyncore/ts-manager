@@ -1,0 +1,27 @@
+# sshd do contêiner de teste (referência para o bloco Match da VM).
+Port 22
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_rsa_key
+LogLevel VERBOSE
+
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+AllowUsers tsm-dev-a tsm-dev-b
+
+AllowTcpForwarding no
+AllowStreamLocalForwarding no
+X11Forwarding no
+AllowAgentForwarding no
+PermitTunnel no
+PermitTTY no
+PermitUserEnvironment no
+PrintMotd no
+
+# Necessário: o scp do OpenSSH >= 9 usa o protocolo SFTP para instalar o agente.
+# sftp-server (e não internal-sftp) passa pelo shell de login e fica no log de auditoria.
+Subsystem sftp /usr/lib/openssh/sftp-server
