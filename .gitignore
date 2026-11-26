@@ -62,3 +62,7 @@ logs/
 Thumbs.db
 desktop.ini
 
+
+# TS Manager — binários baixados e ambiente da PoC
+.tools/
+.poc/

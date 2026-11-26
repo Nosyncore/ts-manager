@@ -1,0 +1,4 @@
+# Arquivos executados dentro de Linux (contêiner de teste e VM) precisam de LF.
+*.sh text eol=lf
+tests/fixtures/sshd/* text eol=lf
+deploy/** text eol=lf
