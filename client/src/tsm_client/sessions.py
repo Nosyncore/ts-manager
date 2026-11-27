@@ -119,8 +119,12 @@ def session_name(binding_id: str, role: Role) -> str:
 
 
 def build_specs(binding: Binding) -> tuple[SyncSpec, SyncSpec]:
-    common = tuple(sync_flags(binding.rules))
-    up_flags = common + (REMOTE_BETA_MODES if binding.workspace.is_remote else ())
+    up_flags = tuple(sync_flags(binding.rules, role=Role.UPLOAD.value)) + (
+        REMOTE_BETA_MODES if binding.workspace.is_remote else ()
+    )
+    down_flags = tuple(sync_flags(binding.rules, role=Role.DOWNLOAD.value)) + (
+        REMOTE_ALPHA_PROBE if binding.shared.is_remote else ()
+    )
     up = SyncSpec(
         name=session_name(binding.id, Role.UPLOAD),
         binding_id=binding.id,
@@ -135,7 +139,7 @@ def build_specs(binding: Binding) -> tuple[SyncSpec, SyncSpec]:
         role=Role.DOWNLOAD,
         alpha=binding.shared,
         beta=binding.cache,
-        flags=common + (REMOTE_ALPHA_PROBE if binding.shared.is_remote else ()),
+        flags=down_flags,
     )
     return up, down
 
