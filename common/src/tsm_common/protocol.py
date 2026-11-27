@@ -26,7 +26,29 @@ UNAUTHORIZED = "unauthorized"
 NOT_FOUND = "not_found"
 BUSY = "busy"
 
+# identidade e acessos: as mensagens nunca dizem se um convite, fingerprint ou usuário existe
+SESSION_EXPIRED = "session_expired"
+PENDING_APPROVAL = "pending_approval"
+RATE_LIMITED = "rate_limited"
+INVALID_INVITE = "invalid_invite"
+INVALID_REQUEST = "invalid_request"
+INVALID_STATE = "invalid_state"
+FINGERPRINT_MISMATCH = "fingerprint_mismatch"
+KEY_IN_USE = "key_in_use"
+LAST_ADMIN = "last_admin"
+PROVISIONING_FAILED = "provisioning_failed"
+
 HTTP_STATUS = {
+    SESSION_EXPIRED: 401,
+    PENDING_APPROVAL: 403,
+    RATE_LIMITED: 429,
+    INVALID_INVITE: 422,
+    INVALID_REQUEST: 422,
+    INVALID_STATE: 409,
+    FINGERPRINT_MISMATCH: 409,
+    KEY_IN_USE: 409,
+    LAST_ADMIN: 409,
+    PROVISIONING_FAILED: 502,
     PUBLISHED: 200,
     NO_CHANGE: 200,
     CONFLICT: 409,

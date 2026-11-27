@@ -10,6 +10,7 @@ corridas entre requisições explícitas.
 from __future__ import annotations
 
 import contextlib
+import json
 import sqlite3
 from collections.abc import Iterable, Iterator
 from dataclasses import astuple, dataclass, fields
@@ -245,8 +246,18 @@ class Tx:
         return _row(Invite, self.conn.execute("SELECT * FROM invites WHERE code_sha256 = ?",
                                               (code_sha256,)).fetchone())
 
-    def list_invites(self) -> list[Invite]:
-        return _rows(Invite, self.conn.execute("SELECT * FROM invites ORDER BY created_at, id"))
+    def list_invites(self, *, kind: str | None = None) -> list[Invite]:
+        if kind is None:
+            return _rows(Invite, self.conn.execute(
+                "SELECT * FROM invites ORDER BY created_at, id"))
+        return _rows(Invite, self.conn.execute(
+            "SELECT * FROM invites WHERE kind = ? ORDER BY created_at, id", (kind,)))
+
+    def revoke_open_invites(self, kind: str, *, now: str) -> int:
+        """Revoga os convites do tipo ainda abertos (sem uso, sem revogação, no prazo)."""
+        return self.conn.execute(
+            "UPDATE invites SET revoked_at = ? WHERE kind = ? AND used_at IS NULL "
+            "AND revoked_at IS NULL AND expires_at > ?", (now, kind, now)).rowcount
 
     def consume_invite(self, invite_id: str, *, now: str) -> bool:
         cur = self.conn.execute(
@@ -314,6 +325,14 @@ class Tx:
             "SELECT * FROM workspace_bindings WHERE project_id = ? AND device_id = ?",
             (project_id, device_id)).fetchone())
 
+    def user_has_active_binding(self, user_id: str, project_id: str) -> bool:
+        """O usuário tem vínculo no projeto por algum dispositivo ``active``."""
+        row = self.conn.execute(
+            "SELECT 1 FROM workspace_bindings b JOIN devices d ON d.id = b.device_id "
+            "WHERE b.project_id = ? AND d.user_id = ? AND d.status = 'active' LIMIT 1",
+            (project_id, user_id)).fetchone()
+        return row is not None
+
     def list_bindings(self, *, project_id: str | None = None,
                       device_id: str | None = None) -> list[Binding]:
         where, params = [], []
@@ -327,6 +346,18 @@ class Tx:
         if where:
             sql += " WHERE " + " AND ".join(where)
         return _rows(Binding, self.conn.execute(sql + " ORDER BY created_at, id", params))
+
+    # ------------------------------------------------------------ auditoria
+
+    def insert_audit(self, *, at: str, event: str, project_id: str | None,
+                     actor_user: str | None, actor_device: str | None,
+                     fields: dict[str, Any]) -> None:
+        """Evento de auditoria (só ``INSERT``; o banco recusa alteração e remoção)."""
+        self.conn.execute(
+            "INSERT INTO audit_logs (at, event, project_id, actor_user, actor_device, fields) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (at, event, project_id, actor_user, actor_device,
+             json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":"))))
 
     # ------------------------------------------------------------ provisionamento
 

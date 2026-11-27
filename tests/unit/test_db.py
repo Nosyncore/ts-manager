@@ -479,3 +479,51 @@ def test_provisioning_ops(repo):
         assert tx.get_op(999) is None
         assert [(o.action, o.status) for o in tx.ops_for_device("d1")] == [
             ("create", "done"), ("disable", "failed")]
+
+
+def test_audit_insert_is_append_only(repo, db):
+    with repo.write() as tx:
+        tx.insert_audit(at=at(), event="device_registered", project_id="demo",
+                        actor_user="u1", actor_device=None, fields={"b": 2, "a": "é"})
+        tx.insert_audit(at=at(1), event="user_blocked", project_id=None, actor_user=None,
+                        actor_device=None, fields={})
+    with db.read() as conn:
+        rows = conn.execute("SELECT * FROM audit_logs ORDER BY id").fetchall()
+    assert [(r["event"], r["project_id"], r["actor_user"]) for r in rows] == [
+        ("device_registered", "demo", "u1"), ("user_blocked", None, None)]
+    assert rows[0]["fields"] == '{"a":"é","b":2}'
+    with pytest.raises(sqlite3.IntegrityError), db.transaction() as conn:
+        conn.execute("DELETE FROM audit_logs")
+
+
+def test_user_has_active_binding(repo):
+    with repo.write() as tx:
+        seed_device(tx, "d1", "u1", "i1")
+        seed_device(tx, "d2", "u1", "i2", device_status="revoked")
+        seed_device(tx, "d3", "u2", "i3", device_status="revoked")
+        tx.insert_binding(Binding("b1", "demo", "d1", "w1", at()))
+        tx.insert_binding(Binding("b2", "outro", "d2", "w2", at()))
+        tx.insert_binding(Binding("b3", "demo", "d3", "w3", at()))
+    with repo.read() as tx:
+        assert tx.user_has_active_binding("u1", "demo")
+        assert not tx.user_has_active_binding("u1", "outro")  # só com dispositivo revogado
+        assert not tx.user_has_active_binding("u2", "demo")
+        assert not tx.user_has_active_binding("u9", "demo")
+
+
+def test_revoke_open_invites_by_kind(repo):
+    with repo.write() as tx:
+        tx.insert_invite(Invite("b1", "h1", "bootstrap", "admin", "demo", None, None, at(),
+                                at(3600)))
+        tx.insert_invite(Invite("b2", "h2", "bootstrap", "admin", "demo", None, None, at(),
+                                at(3600), used_at=at(1)))
+        tx.insert_invite(Invite("b3", "h3", "bootstrap", "admin", "demo", None, None, at(),
+                                at(10)))
+        tx.insert_invite(invite("n1"))
+        assert tx.revoke_open_invites("bootstrap", now=at(20)) == 1
+        assert tx.revoke_open_invites("bootstrap", now=at(20)) == 0
+        assert tx.get_invite("b1").revoked_at == at(20)
+        assert tx.get_invite("b2").revoked_at is None   # usado
+        assert tx.get_invite("b3").revoked_at is None   # expirado
+        assert tx.get_invite("n1").revoked_at is None   # outro tipo
+        assert [i.id for i in tx.list_invites(kind="bootstrap")] == ["b1", "b2", "b3"]

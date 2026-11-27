@@ -1,0 +1,27 @@
+{
+  "source": "ssh-keygen -t <tipo> e ssh-keygen -lf <arquivo>.pub (OpenSSH 10.2p1, Git for Windows); só as chaves públicas",
+  "ed25519": [
+    {
+      "line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBaBW3mTZmaTGddtY3pc+fZuseuAhrRtPAArlknPuVNp dev-a@pc",
+      "fingerprint": "SHA256:abBPfU7aCcoDwiDDdarFS0BxHQhEyGBlZ6EXeF5Tucc"
+    },
+    {
+      "line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPsxPKf8p/FLRfXSkU64QsKxoSUW968DCvat7VXSS/Z7 dev-b@pc",
+      "fingerprint": "SHA256:dDefZ4hGmbhKLrer8QXXIOsCzOBcACx++yhp4Vp+nPI"
+    },
+    {
+      "line": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIISUBQyYiT74JXp8lfjhHSub96AM6PrqOJjJRPaKeS5P dev-c@pc",
+      "fingerprint": "SHA256:epztowtOwD9W8Y6tAnmkm58r7Av/Pv/AsvPm5zchO6k"
+    }
+  ],
+  "other": [
+    {
+      "line": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQChbohNilyJFYwLhDUuAYs4zZCDHggx1ifdDkiQTM3niH9d4NnX0VxmcycWIn6+z2jRJLlfq4O8A/ji+pPfb/3vsyWW73+VicuXWKkZIo9n3gsBuWzpt0RdkMRhuA6e+BO6jIsIzKkeBQz/irrWImrzD3y99Oj2Fs6YphTBQQb/BccZ88WTjgNP3pIiJjHs+G7erNmSw0yyfsyBhaunB5lrKeU5FmarFj4Rw12+heb0hClqiLfWYDdtZHxD6PdqzKnx5ufRDVd3RixwueaZm5rJCPhKtnm8VOYBHA+K7fulYco9jGQrcG1SP8BdXzwo9Var6kaQYvR8dZOtQypcKML5 rsa",
+      "fingerprint": "SHA256:6+OsPBkyYVyZiWdW5+/euJseIrNukFzkD+z89zAD1Ak"
+    },
+    {
+      "line": "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBGUTVd5XpNKmvfHIE7BQ/kb3w7mgjjpFZapUKExl8PR8XpqD2jfdlOLHTDdXjXbA0SRapVLC9243Q9kg0Wcs4PY= ecdsa",
+      "fingerprint": "SHA256:u2ZdGbcTkv/yXLVZjjdqVmolns+Cc35acTWSGrMCirQ"
+    }
+  ]
+}
