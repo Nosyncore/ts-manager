@@ -178,6 +178,8 @@ def begin_approval(ctx: IdentityContext, actor: Actor, device_id: str, *,
         device, invite = _device_for_decision(tx, actor, device_id)
         if device.status != "pending":
             raise _invalid_state(f"dispositivo em {device.status}, não pending")
+        if any(op.status == "pending" for op in tx.ops_for_device(device.id)):
+            raise _invalid_state("operação de provisionamento pendente; rode o recover")
         if fingerprint != device.fingerprint:
             raise IdentityError(P.FINGERPRINT_MISMATCH,
                                 "fingerprint diferente do da solicitação")
@@ -295,6 +297,84 @@ def revoke(ctx: IdentityContext, actor: Actor, device_id: str, *,
         ctx.audit(tx, "device_revoked", actor=actor, device=device.id, op=op_id,
                   sessions=sessions_revoked, **extra)
         return op_id
+
+
+def purge(ctx: IdentityContext, actor: Actor, device_id: str) -> int:
+    """Expurgo (conta, chave e workspace) de dispositivo revogado: operação ``delete``.
+
+    Só o operador; exige a revogação SSH concluída e nenhum expurgo pendente.
+    """
+    with _audited(ctx, "purge_refused", actor, device=device_id), ctx.repo.write() as tx:
+        require_operator(actor, "expurgo")
+        device = tx.get_device(device_id)
+        if device is None:
+            raise IdentityError(P.NOT_FOUND, "dispositivo não encontrado")
+        if device.status != "revoked":
+            raise _invalid_state(f"dispositivo em {device.status}, não revoked")
+        pending = {op.action for op in tx.ops_for_device(device.id) if op.status == "pending"}
+        if "disable" in pending:
+            raise _invalid_state("revogação SSH pendente")
+        if "delete" in pending:
+            raise _invalid_state("expurgo já pendente")
+        op_id = tx.insert_op(device.id, "delete", now=ctx.now_ts())
+        ctx.audit(tx, "device_purge_requested", actor=actor, device=device.id, op=op_id)
+        return op_id
+
+
+# ---------------------------------------------------------------- operações
+
+
+def schedule_disable(ctx: IdentityContext, device_id: str, reason: str) -> int:
+    """Agenda a desativação da conta (``disable``) se ainda não houver uma pendente.
+
+    Usada quando a aprovação falha depois de o helper criar a conta e a desativação
+    imediata também falha: um dispositivo fora de ``active`` não pode ficar com SSH.
+    """
+    with ctx.repo.write() as tx:
+        device = tx.get_device(device_id)
+        if device is None:
+            raise IdentityError(P.NOT_FOUND, "dispositivo não encontrado")
+        for op in tx.ops_for_device(device.id):
+            if op.status == "pending" and op.action == "disable":
+                return op.id
+        op_id = tx.insert_op(device.id, "disable", now=ctx.now_ts())
+        ctx.audit(tx, "provisioning_disable_scheduled", device=device.id, op=op_id,
+                  reason=str(reason)[:_MAX_ERROR_CHARS])
+        return op_id
+
+
+def finish_operation(ctx: IdentityContext, op_id: int, *, error: str | None = None,
+                     abandon: bool = False) -> ProvisioningOp:
+    """Resultado de uma operação de provisionamento executada.
+
+    - sem erro: ``done`` (só ``disable``, ``enable`` e ``delete``; ``create`` é concluída
+      pela aprovação);
+    - com erro: a operação continua ``pending`` com o erro, para nova tentativa;
+    - ``abandon``: ``failed`` com o erro (o estado do dispositivo não permite mais executá-la).
+    """
+    if abandon and not error:
+        raise ValueError("abandono exige o motivo")
+    message = None if error is None else str(error)[:_MAX_ERROR_CHARS]
+    with ctx.repo.write() as tx:
+        op = tx.get_op(op_id)
+        if op is None:
+            raise IdentityError(P.NOT_FOUND, "operação não encontrada")
+        if op.status != "pending":
+            raise _invalid_state(f"operação em {op.status}")
+        now = ctx.now_ts()
+        fields = {"device": op.device_id, "op": op.id, "action": op.action}
+        if abandon:
+            tx.finish_op(op.id, status="failed", now=now, error=message)
+            ctx.audit(tx, "provisioning_abandoned", error=message, **fields)
+        elif message is not None:
+            tx.note_op_error(op.id, message)
+            ctx.audit(tx, "provisioning_retry", error=message, **fields)
+        else:
+            if op.action == "create":
+                raise _invalid_state("create é concluída pela aprovação")
+            tx.finish_op(op.id, status="done", now=now)
+            ctx.audit(tx, "provisioning_done", **fields)
+        return tx.get_op(op.id) or op
 
 
 # ---------------------------------------------------------------- usuários

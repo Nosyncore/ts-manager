@@ -3,3 +3,4 @@
 tests/fixtures/sshd/* text eol=lf
 deploy/** text eol=lf
 tests/fixtures/manager/* text eol=lf
+server/helper/* text eol=lf

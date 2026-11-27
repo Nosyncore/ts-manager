@@ -378,6 +378,12 @@ class Tx:
                                 (status, error, now, op_id))
         return cur.rowcount == 1
 
+    def note_op_error(self, op_id: int, error: str) -> bool:
+        """Registra o erro de uma tentativa; a operação continua ``pending``."""
+        cur = self.conn.execute("UPDATE provisioning_ops SET error = ? "
+                                "WHERE id = ? AND status = 'pending'", (error, op_id))
+        return cur.rowcount == 1
+
     def get_op(self, op_id: int) -> ProvisioningOp | None:
         return _row(ProvisioningOp, self.conn.execute(
             "SELECT * FROM provisioning_ops WHERE id = ?", (op_id,)).fetchone())

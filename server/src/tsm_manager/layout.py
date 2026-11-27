@@ -27,6 +27,14 @@ class ProjectLayout:
     def workspace(self, name: str) -> Path:
         return self.workspaces / name
 
+    def account_gate(self, account: str) -> Path:
+        """Portão do workspace de uma conta de dispositivo (``<conta>:<grupo do Manager>``)."""
+        return self.workspaces / account
+
+    def sync_root(self, account: str) -> Path:
+        """Raiz sincronizada pelo Mutagen dentro do portão (``<conta>:<workspace_group>``)."""
+        return self.account_gate(account) / "tree"
+
     @property
     def shared(self) -> Path:
         return self.project_dir / "shared"

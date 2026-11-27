@@ -1,0 +1,570 @@
+#!/usr/bin/python3 -I
+"""tsm-provision: contas SSH de dispositivo do TS Manager (executado como root).
+
+Invocado pelo Manager como ``sudo -n /usr/local/libexec/tsm-provision <verbo> <args>``.
+Script único, só stdlib; não importa nada da venv do Manager. Verbos (idempotentes):
+
+    create-device  <conta> <projeto>   chave pública pela entrada padrão
+    disable-device <conta>
+    enable-device  <conta>             chave pública pela entrada padrão
+    delete-device  <conta> <projeto>
+    inspect-device <conta> <projeto>
+
+Regras:
+- config fixa em /etc/tsm/provision.json; nenhum caminho vem de argumento ou ambiente;
+- a conta casa ^tsm-d-[0-9a-f]{12}$ e o prefixo da config; o projeto está na lista da
+  config; a chave é exatamente uma linha "ssh-ed25519 <base64>" (blob de 51 bytes);
+- binários por caminho absoluto, lista de argumentos, ambiente limpo;
+- diretórios e arquivos manipulados por descritor, sem seguir symlink;
+- a chave autorizada fica em <keys_dir>/<conta> (root:root 0644), fora do home da conta;
+- saída: uma linha JSON; códigos 0 ok, 2 argumento inválido, 3 conflito, 4 falha do sistema;
+- uma linha de syslog (logger -t tsm-provision) por execução.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import contextlib
+import hashlib
+import json
+import os
+import posixpath
+import re
+import struct
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+
+CONFIG_PATH = "/etc/tsm/provision.json"
+SHADOW_PATH = "/etc/shadow"
+USERADD = "/usr/sbin/useradd"
+USERMOD = "/usr/sbin/usermod"
+USERDEL = "/usr/sbin/userdel"
+PKILL = "/usr/bin/pkill"
+PGREP = "/usr/bin/pgrep"
+LOGGER = "/usr/bin/logger"
+CLEAN_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LC_ALL": "C", "LANG": "C"}
+SHELL = "/bin/sh"
+# O helper só roda em Linux; o valor 0 existe só para os testes fora dele.
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+EXIT_OK, EXIT_INVALID, EXIT_CONFLICT, EXIT_SYSTEM = 0, 2, 3, 4
+MAX_KEY_BYTES = 1024
+KEY_TYPE = b"ssh-ed25519"
+ED25519_BLOB_SIZE = 51
+HOME_MODE = 0o700
+GATE_MODE = 0o750
+TREE_MODE = 0o750
+KEYS_DIR_MODE = 0o755
+KEY_FILE_MODE = 0o644
+
+ACCOUNT_RE = re.compile(r"^tsm-d-[0-9a-f]{12}$")
+PROJECT_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
+GROUP_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
+PREFIX_RE = re.compile(r"^[a-z][a-z0-9-]{0,15}-$")
+KEY_RE = re.compile(r"^ssh-ed25519 ([A-Za-z0-9+/]+={0,2})$")
+ABS_PATH_RE = re.compile(r"^(/[A-Za-z0-9._-]+)+$")
+
+
+class Invalid(Exception):
+    """Argumento, chave ou config inválidos (código 2)."""
+
+
+class Conflict(Exception):
+    """Estado existente incompatível com o pedido (código 3)."""
+
+
+class Failure(Exception):
+    """Falha do sistema (código 4)."""
+
+
+# ---------------------------------------------------------------- config e validação
+
+
+@dataclass(frozen=True)
+class Config:
+    root: str
+    account_prefix: str
+    devices_group: str
+    shared_group: str
+    workspace_group: str
+    manager_group: str
+    keys_dir: str
+    projects: tuple[str, ...]
+    process_wait_s: float = 10.0
+
+    @property
+    def device_groups(self) -> tuple[str, ...]:
+        return (self.devices_group, self.shared_group, self.workspace_group)
+
+
+def _abs_path(value: object, name: str) -> str:
+    if not isinstance(value, str) or not ABS_PATH_RE.match(value) or any(
+            part in (".", "..") for part in value.split("/")):
+        raise Failure(f"config: {name} inválido")
+    return value
+
+
+def parse_config(text: str) -> Config:
+    try:
+        raw = json.loads(text)
+    except ValueError as exc:
+        raise Failure("config: JSON inválido") from exc
+    if not isinstance(raw, dict):
+        raise Failure("config: esperado objeto")
+    expected = {"root", "account_prefix", "devices_group", "shared_group", "workspace_group",
+                "manager_group", "keys_dir", "projects", "process_wait_s"}
+    unknown = set(raw) - expected
+    missing = expected - {"process_wait_s"} - set(raw)
+    if unknown or missing:
+        raise Failure(f"config: campos {sorted(unknown | missing)}")
+    groups = {}
+    for name in ("devices_group", "shared_group", "workspace_group", "manager_group"):
+        value = raw[name]
+        if not isinstance(value, str) or not GROUP_RE.match(value):
+            raise Failure(f"config: {name} inválido")
+        groups[name] = value
+    prefix = raw["account_prefix"]
+    if not isinstance(prefix, str) or not PREFIX_RE.match(prefix):
+        raise Failure("config: account_prefix inválido")
+    projects = raw["projects"]
+    if not isinstance(projects, list) or not projects or not all(
+            isinstance(p, str) and PROJECT_RE.match(p) for p in projects):
+        raise Failure("config: projects inválido")
+    wait = raw.get("process_wait_s", 10.0)
+    if isinstance(wait, bool) or not isinstance(wait, int | float) or not 0 < wait <= 120:
+        raise Failure("config: process_wait_s inválido")
+    return Config(root=_abs_path(raw["root"], "root"), account_prefix=prefix,
+                  keys_dir=_abs_path(raw["keys_dir"], "keys_dir"), projects=tuple(projects),
+                  process_wait_s=float(wait), **groups)
+
+
+def check_account(cfg: Config, value: str) -> str:
+    if not ACCOUNT_RE.match(value) or not value.startswith(cfg.account_prefix):
+        raise Invalid("conta inválida")
+    return value
+
+
+def check_project(cfg: Config, value: str) -> str:
+    if not PROJECT_RE.match(value) or value not in cfg.projects:
+        raise Invalid("projeto não permitido")
+    return value
+
+
+def parse_key(data: bytes) -> tuple[str, str]:
+    """Linha ``ssh-ed25519 <base64>`` → (linha normalizada, fingerprint ``SHA256:…``)."""
+    if len(data) > MAX_KEY_BYTES:
+        raise Invalid("chave longa demais")
+    try:
+        text = data.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise Invalid("chave com bytes fora do ASCII") from exc
+    if text.endswith("\n"):
+        text = text[:-1]
+    match = KEY_RE.match(text)
+    if match is None:
+        raise Invalid("chave deve ser uma linha 'ssh-ed25519 <base64>'")
+    encoded = match.group(1)
+    if len(encoded) % 4:
+        raise Invalid("base64 da chave inválido")
+    try:
+        blob = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise Invalid("base64 da chave inválido") from exc
+    if base64.b64encode(blob).decode("ascii") != encoded:
+        raise Invalid("base64 da chave não canônico")
+    if len(blob) != ED25519_BLOB_SIZE:
+        raise Invalid("blob da chave com tamanho inválido")
+    kind_len, = struct.unpack_from(">I", blob, 0)
+    key_len, = struct.unpack_from(">I", blob, 4 + len(KEY_TYPE))
+    if kind_len != len(KEY_TYPE) or blob[4:4 + len(KEY_TYPE)] != KEY_TYPE or key_len != 32:
+        raise Invalid("blob da chave não é ssh-ed25519")
+    digest = base64.b64encode(hashlib.sha256(blob).digest()).decode("ascii").rstrip("=")
+    return f"ssh-ed25519 {encoded}", "SHA256:" + digest
+
+
+# ---------------------------------------------------------------- acesso ao sistema
+
+
+@dataclass(frozen=True)
+class Stat:
+    kind: str  # dir | file | link | other
+    uid: int
+    gid: int
+    mode: int
+
+
+@dataclass(frozen=True)
+class PwEntry:
+    name: str
+    uid: int
+    gid: int
+    home: str
+
+
+class RealSystem:
+    """Único ponto que toca o sistema; nunca segue symlink ao alterar dono, modo ou conteúdo."""
+
+    def is_root(self) -> bool:
+        return os.geteuid() == 0
+
+    def read_config(self, path: str) -> str:
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+
+    def run(self, argv: list[str], stdin: bytes | None = None) -> tuple[int, bytes]:
+        proc = subprocess.run(argv, input=stdin, env=CLEAN_ENV, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=60, check=False)
+        return proc.returncode, proc.stdout
+
+    def lstat(self, path: str) -> Stat | None:
+        import stat as st
+        try:
+            s = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        kind = ("link" if st.S_ISLNK(s.st_mode) else "dir" if st.S_ISDIR(s.st_mode)
+                else "file" if st.S_ISREG(s.st_mode) else "other")
+        return Stat(kind, s.st_uid, s.st_gid, st.S_IMODE(s.st_mode))
+
+    def mkdir(self, path: str, mode: int) -> None:
+        os.mkdir(path, mode)
+
+    def set_owner_mode(self, path: str, uid: int, gid: int, mode: int) -> None:
+        fd = os.open(path, os.O_RDONLY | _NOFOLLOW | _DIRECTORY)
+        try:
+            os.fchown(fd, uid, gid)
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+
+    def read_file(self, path: str) -> bytes | None:
+        try:
+            fd = os.open(path, os.O_RDONLY | _NOFOLLOW | getattr(os, "O_BINARY", 0))
+        except FileNotFoundError:
+            return None
+        with os.fdopen(fd, "rb") as f:
+            return f.read(MAX_KEY_BYTES + 1)
+
+    def write_file(self, path: str, data: bytes, mode: int) -> None:
+        tmp = f"{path}.tmp-{os.getpid()}"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+                os.fchown(f.fileno(), 0, 0)
+                os.fchmod(f.fileno(), mode)
+                f.flush()
+                os.fsync(f.fileno())
+            os.rename(tmp, path)
+        except BaseException:
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
+            raise
+
+    def remove_file(self, path: str) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+
+    def remove_tree(self, path: str) -> None:
+        import shutil
+        shutil.rmtree(path)  # versão por descritor: não segue symlinks
+
+    def getpwnam(self, name: str) -> PwEntry | None:
+        import pwd
+        try:
+            p = pwd.getpwnam(name)
+        except KeyError:
+            return None
+        return PwEntry(p.pw_name, p.pw_uid, p.pw_gid, p.pw_dir)
+
+    def getgrnam(self, name: str) -> int | None:
+        import grp
+        try:
+            return grp.getgrnam(name).gr_gid
+        except KeyError:
+            return None
+
+    def user_groups(self, name: str) -> list[str]:
+        import grp
+        user = self.getpwnam(name)
+        if user is None:
+            return []
+        names = {g.gr_name for g in grp.getgrall() if name in g.gr_mem}
+        with contextlib.suppress(KeyError):
+            names.add(grp.getgrgid(user.gid).gr_name)
+        return sorted(names)
+
+    def user_name(self, uid: int) -> str:
+        import pwd
+        try:
+            return pwd.getpwuid(uid).pw_name
+        except KeyError:
+            return str(uid)
+
+    def group_name(self, gid: int) -> str:
+        import grp
+        try:
+            return grp.getgrgid(gid).gr_name
+        except KeyError:
+            return str(gid)
+
+    def shadow_expire(self, name: str) -> int | None:
+        with open(SHADOW_PATH, encoding="utf-8") as f:
+            for line in f:
+                fields = line.rstrip("\n").split(":")
+                if fields[0] == name and len(fields) > 7:
+                    return int(fields[7]) if fields[7] else None
+        return None
+
+    def today(self) -> int:
+        return int(time.time() // 86400)
+
+    def monotonic(self) -> float:
+        return time.monotonic()
+
+    def sleep(self, seconds: float) -> None:
+        time.sleep(seconds)
+
+
+# ---------------------------------------------------------------- operações
+
+
+class Helper:
+    def __init__(self, cfg: Config, system) -> None:
+        self.cfg = cfg
+        self.sys = system
+
+    # ------------------------------------------------------------ apoio
+
+    def _workspaces(self, project: str) -> str:
+        """``<root>/projects/<projeto>/workspaces``: diretórios reais, sem escrita alheia."""
+        parts = [self.cfg.root, "projects", project, "workspaces"]
+        path = ""
+        for part in parts:
+            path = posixpath.join(path, part) if path else part
+            st = self.sys.lstat(path)
+            if st is None or st.kind != "dir":
+                raise Failure(f"diretório ausente ou não real: {path}")
+        if st.mode & 0o022:
+            raise Failure(f"{path} com escrita para grupo ou outros")
+        return path
+
+    def _gid(self, name: str) -> int:
+        gid = self.sys.getgrnam(name)
+        if gid is None:
+            raise Failure(f"grupo ausente: {name}")
+        return gid
+
+    def _key_path(self, account: str) -> str:
+        return posixpath.join(self.cfg.keys_dir, account)
+
+    def _ensure_dir(self, path: str, uid: int, gid: int, mode: int) -> None:
+        st = self.sys.lstat(path)
+        if st is None:
+            self.sys.mkdir(path, mode)
+        elif st.kind != "dir":
+            raise Failure(f"não é diretório real: {path}")
+        self.sys.set_owner_mode(path, uid, gid, mode)
+
+    def _installed_key(self, account: str) -> bytes | None:
+        path = self._key_path(account)
+        st = self.sys.lstat(path)
+        if st is None:
+            return None
+        if st.kind != "file":
+            raise Failure(f"chave não é arquivo regular: {path}")
+        return self.sys.read_file(path)
+
+    def _install_key(self, account: str, line: str) -> None:
+        self._ensure_dir(self.cfg.keys_dir, 0, 0, KEYS_DIR_MODE)
+        data = (line + "\n").encode("ascii")
+        if self._installed_key(account) != data:
+            self.sys.write_file(self._key_path(account), data, KEY_FILE_MODE)
+
+    def _run(self, argv: list[str], ok: tuple[int, ...] = (0,)) -> bytes:
+        rc, out = self.sys.run(argv)
+        if rc not in ok:
+            raise Failure(f"{posixpath.basename(argv[0])} falhou ({rc})")
+        return out
+
+    def _processes(self, account: str) -> int:
+        rc, out = self.sys.run([PGREP, "-u", account])
+        if rc not in (0, 1):
+            raise Failure(f"pgrep falhou ({rc})")
+        return len(out.split()) if rc == 0 else 0
+
+    # ------------------------------------------------------------ verbos
+
+    def create_device(self, account: str, project: str, key: bytes) -> dict:
+        line, _ = parse_key(key)
+        workspaces = self._workspaces(project)
+        manager_gid = self._gid(self.cfg.manager_group)
+        ws_gid = self._gid(self.cfg.workspace_group)
+        for group in self.cfg.device_groups:
+            self._gid(group)
+        user = self.sys.getpwnam(account)
+        created = user is None
+        if user is not None:
+            installed = self._installed_key(account)
+            if installed is not None and installed != (line + "\n").encode("ascii"):
+                raise Conflict("conta existente com outra chave")
+            # uma tentativa anterior que falhou na conferência deixou a conta expirada
+            self._run([USERMOD, "--expiredate", "", account])
+        else:
+            self._run([USERADD, "--user-group", "--create-home", "--shell", SHELL,
+                       "--password", "*", "--groups", ",".join(self.cfg.device_groups),
+                       account])
+            user = self.sys.getpwnam(account)
+            if user is None:
+                raise Failure("conta não aparece depois do useradd")
+        missing = [g for g in self.cfg.device_groups if g not in self.sys.user_groups(account)]
+        if missing:
+            self._run([USERMOD, "--append", "--groups", ",".join(missing), account])
+        self._ensure_dir(user.home, user.uid, user.gid, HOME_MODE)
+        gate = posixpath.join(workspaces, account)
+        self._ensure_dir(gate, user.uid, manager_gid, GATE_MODE)
+        self._ensure_dir(posixpath.join(gate, "tree"), user.uid, ws_gid, TREE_MODE)
+        self._install_key(account, line)
+        return {"ok": True, "account": account, "created": created}
+
+    def disable_device(self, account: str) -> dict:
+        self.sys.remove_file(self._key_path(account))
+        if self.sys.getpwnam(account) is None:
+            return {"ok": True, "account": account, "exists": False}
+        self._run([USERMOD, "--expiredate", "1", account])
+        deadline = self.sys.monotonic() + self.cfg.process_wait_s
+        while True:
+            self._run([PKILL, "-KILL", "-u", account], ok=(0, 1))
+            remaining = self._processes(account)
+            if remaining == 0:
+                break
+            if self.sys.monotonic() >= deadline:
+                raise Failure(f"{remaining} processo(s) da conta não terminaram")
+            self.sys.sleep(0.2)
+        return {"ok": True, "account": account, "exists": True}
+
+    def enable_device(self, account: str, key: bytes) -> dict:
+        line, _ = parse_key(key)
+        if self.sys.getpwnam(account) is None:
+            raise Conflict("conta inexistente")
+        self._install_key(account, line)
+        self._run([USERMOD, "--expiredate", "", account])
+        return {"ok": True, "account": account}
+
+    def delete_device(self, account: str, project: str) -> dict:
+        workspaces = self._workspaces(project)
+        self.disable_device(account)
+        if self.sys.getpwnam(account) is not None:
+            self._run([USERDEL, "--remove", account], ok=(0, 12))
+        gate = posixpath.join(workspaces, account)
+        st = self.sys.lstat(gate)
+        if st is not None:
+            if st.kind == "dir":
+                self.sys.remove_tree(gate)
+            else:
+                self.sys.remove_file(gate)
+        return {"ok": True, "account": account}
+
+    def _owner(self, path: str) -> dict | None:
+        st = self.sys.lstat(path)
+        if st is None or st.kind != "dir":
+            return None
+        return {"owner": self.sys.user_name(st.uid), "group": self.sys.group_name(st.gid),
+                "mode": oct(st.mode)}
+
+    def inspect_device(self, account: str, project: str) -> dict:
+        workspaces = self._workspaces(project)
+        user = self.sys.getpwnam(account)
+        installed = self._installed_key(account)
+        fingerprint = None
+        if installed is not None:
+            try:
+                fingerprint = parse_key(installed)[1]
+            except Invalid:
+                fingerprint = "invalid"
+        expire = self.sys.shadow_expire(account) if user else None
+        gate = posixpath.join(workspaces, account)
+        return {
+            "ok": True, "account": account, "exists": user is not None,
+            "expired": expire is not None and expire <= self.sys.today(),
+            "groups": self.sys.user_groups(account) if user else [],
+            "key_fingerprint": fingerprint,
+            "processes": self._processes(account) if user else 0,
+            "home": self._owner(user.home) if user else None,
+            "gate": self._owner(gate),
+            "tree": self._owner(posixpath.join(gate, "tree")),
+        }
+
+
+# ---------------------------------------------------------------- entrada
+
+
+VERBS = {
+    "create-device": (2, True),
+    "disable-device": (1, False),
+    "enable-device": (1, True),
+    "delete-device": (2, False),
+    "inspect-device": (2, False),
+}
+
+
+def _log(system, verb: str, account: str, result: str) -> None:
+    with contextlib.suppress(Exception):  # o log nunca muda o resultado
+        system.run([LOGGER, "-t", "tsm-provision", "--", f"{verb} {account} {result}"])
+
+
+def main(argv: list[str], stdin, stdout, stderr, system=None,
+         config_path: str = CONFIG_PATH) -> int:
+    system = system or RealSystem()
+    verb = argv[0] if argv else ""
+    account = "-"
+    try:
+        if verb not in VERBS:
+            raise Invalid("verbo desconhecido")
+        nargs, wants_key = VERBS[verb]
+        if len(argv) != 1 + nargs:
+            raise Invalid("número de argumentos inválido")
+        if not system.is_root():
+            raise Failure("precisa ser executado como root")
+        try:
+            cfg = parse_config(system.read_config(config_path))
+        except OSError as exc:
+            raise Failure("config ilegível") from exc
+        account = check_account(cfg, argv[1])
+        project = check_project(cfg, argv[2]) if nargs == 2 else None
+        key = stdin.read(MAX_KEY_BYTES + 1) if wants_key else None
+        helper = Helper(cfg, system)
+        match verb:
+            case "create-device":
+                result = helper.create_device(account, project, key)
+            case "disable-device":
+                result = helper.disable_device(account)
+            case "enable-device":
+                result = helper.enable_device(account, key)
+            case "delete-device":
+                result = helper.delete_device(account, project)
+            case _:
+                result = helper.inspect_device(account, project)
+        code, error = EXIT_OK, None
+    except Invalid as exc:
+        code, error, result = EXIT_INVALID, "invalid", {"detail": str(exc)}
+    except Conflict as exc:
+        code, error, result = EXIT_CONFLICT, "conflict", {"detail": str(exc)}
+    except Failure as exc:
+        code, error, result = EXIT_SYSTEM, "system", {"detail": str(exc)}
+    except Exception:  # nada inesperado vaza
+        code, error, result = EXIT_SYSTEM, "system", {"detail": "erro interno"}
+    if error is not None:
+        result = {"ok": False, "error": error, **result}
+        stderr.write(f"tsm-provision: {error}\n")
+    _log(system, verb if verb in VERBS else "-", account, error or "ok")
+    stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:], sys.stdin.buffer, sys.stdout, sys.stderr))
