@@ -317,3 +317,50 @@ def test_init_rejects_source_without_project_file(tmp_path):
     e = Env(tmp_path)
     out = e.svc.init_project(src)
     assert out.status == P.REJECTED and not e.git.refs
+
+
+class TreeBindings(ConfigBindings):
+    """Vínculos como os do banco: o conteúdo fica em ``workspaces/<conta>/tree``."""
+
+    def workspace_path(self, layout, binding):
+        return layout.sync_root(binding.workspace)
+
+
+def test_publish_with_requester_and_tree_workspace(env):
+    from tsm_manager.project import Requester
+
+    svc = ProjectService(env.project, env.layout, git=env.git, store=env.store,
+                         bindings=TreeBindings(env.project), lock_timeout=5)
+    who = Requester("Fulano <x>", "u-123", "d-456", False)
+    data = b"mana = 3\n"
+    target = env.layout.sync_root("pca") / SPELLS
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    change = {"path": SPELLS, "op": "put", "sha256": hashlib.sha256(data).hexdigest(),
+              "size": len(data)}
+    out = svc.publish(who, svc.bindings.get("demo-pca"), env.request([change]))
+    assert out.status == P.PUBLISHED, out.payload
+    commit = env.git.commits[out.payload["commit"]]
+    assert commit.author_name == "Fulano x"
+    assert commit.author_email == "u-123@d-456.tsm"
+    assert "TSM-User: Fulano <x>" in commit.message
+    assert "TSM-User-Id: u-123" in commit.message and "TSM-Device: d-456" in commit.message
+    rev = svc.revisions(1)[0]
+    assert rev["user"] == "Fulano <x>" and rev["device"] == "d-456"
+    assert svc.rollback(who, {}).status == P.FORBIDDEN
+
+
+def test_identity_keeps_the_test_identity_trailers(env):
+    out = env.svc.publish(DEV, env.binding, env.request([env.write_workspace(SPELLS, b"z\n")]))
+    commit = env.git.commits[out.payload["commit"]]
+    assert commit.author_email == "dev-a@pca.tsm"
+    assert "TSM-User-Id" not in commit.message
+
+
+def test_requester_from_identity():
+    from tsm_manager.project import Requester
+
+    assert Requester.of(DEV) == Requester("dev-a", "dev-a", "pca", False)
+    assert Requester.of(ADMIN) == Requester("admin", "admin", None, True)
+    who = Requester("x", "u", "d", True)
+    assert Requester.of(who) is who

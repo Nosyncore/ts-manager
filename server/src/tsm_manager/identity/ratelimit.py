@@ -131,3 +131,37 @@ class RateLimiter:
         """Número de IPs guardados."""
         with self._lock:
             return len(self._ips)
+
+
+class RefusalAudit:
+    """Auditoria agregada das recusas do rate limit.
+
+    A primeira recusa de um IP numa classe é registrada na hora; as seguintes, dentro de
+    ``window_s``, só são contadas e entram na contagem do próximo registro. Assim, um abuso
+    gera no máximo um registro por IP e classe a cada janela, e nenhuma recusa se perde da
+    contagem. O número de chaves é limitado (as mais antigas saem primeiro).
+    """
+
+    def __init__(self, write: Callable[[str, str, int], None], *, window_s: float = 60.0,
+                 clock: Callable[[], float] = time.monotonic, max_keys: int = 10_000) -> None:
+        self._write = write
+        self._window = window_s
+        self._clock = clock
+        self._max_keys = max_keys
+        self._seen: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def refused(self, ip: str, route_class: str) -> None:
+        key = (ip, route_class)
+        with self._lock:
+            now = self._clock()
+            entry = self._seen.get(key)
+            if entry is not None and now - entry[0] < self._window:
+                entry[1] += 1
+                return
+            count = int(entry[1]) + 1 if entry is not None else 1
+            self._seen[key] = [now, 0]
+            self._seen.move_to_end(key)
+            while len(self._seen) > self._max_keys:
+                self._seen.popitem(last=False)
+        self._write(ip, route_class, count)

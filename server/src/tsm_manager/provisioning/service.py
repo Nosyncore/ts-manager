@@ -111,15 +111,15 @@ class ProvisioningService:
             match op.action:
                 case "disable":
                     self.provisioner.disable_device(account)
-                    problem = self._disabled_problem(
+                    problem = self.disabled_problem(
                         self.provisioner.inspect_device(account, project))
                 case "enable":
                     self.provisioner.enable_device(account, device.public_key)
-                    problem = self._enabled_problem(
+                    problem = self.enabled_problem(
                         self.provisioner.inspect_device(account, project), device)
                 case _:
                     self.provisioner.delete_device(account, project)
-                    problem = self._deleted_problem(
+                    problem = self.deleted_problem(
                         self.provisioner.inspect_device(account, project))
         except ProvisionError as exc:
             problem = str(exc)
@@ -142,7 +142,7 @@ class ProvisioningService:
             try:
                 self.provisioner.create_device(account, target.project_id,
                                                device.public_key)
-                problem = self._created_problem(
+                problem = self.created_problem(
                     self.provisioner.inspect_device(account, target.project_id), device)
             except ProvisionError as exc:
                 problem = str(exc)
@@ -159,9 +159,9 @@ class ProvisioningService:
         except ProvisionError:
             accounts.schedule_disable(self.ctx, device_id, reason)
 
-    # ------------------------------------------------------------ conferências
+    # ------------------------------------------------------------ conferências (também do verify)
 
-    def _created_problem(self, insp: Inspection, device: Device) -> str | None:
+    def created_problem(self, insp: Inspection, device: Device) -> str | None:
         account = device.ssh_account
         p = self.policy
         missing = sorted(p.device_groups - insp.groups)
@@ -180,7 +180,7 @@ class ProvisioningService:
         return next((message for failed, message in checks if failed), None)
 
     @staticmethod
-    def _disabled_problem(insp: Inspection) -> str | None:
+    def disabled_problem(insp: Inspection) -> str | None:
         if insp.key_fingerprint is not None:
             return "chave ainda instalada"
         if insp.exists and not insp.expired:
@@ -190,7 +190,7 @@ class ProvisioningService:
         return None
 
     @staticmethod
-    def _enabled_problem(insp: Inspection, device: Device) -> str | None:
+    def enabled_problem(insp: Inspection, device: Device) -> str | None:
         if not insp.exists:
             return "conta não existe"
         if insp.expired:
@@ -200,7 +200,7 @@ class ProvisioningService:
         return None
 
     @staticmethod
-    def _deleted_problem(insp: Inspection) -> str | None:
+    def deleted_problem(insp: Inspection) -> str | None:
         if insp.exists:
             return "conta ainda existe"
         if insp.gate is not None:

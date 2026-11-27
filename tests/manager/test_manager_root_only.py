@@ -35,9 +35,10 @@ pytestmark = pytest.mark.integration
 SPELLS = "data/scripts/spells.lua"
 
 
-def _outside_state(tmp_path: Path, root: Path) -> tuple[dict[str, str], dict[str, int]]:
+def _outside_state(tmp_path: Path, root: Path, *also_mutable: Path
+                   ) -> tuple[dict[str, str], dict[str, int]]:
     """Arquivos fora de ``root`` e o ``mtime`` de cada diretório fora de ``root``."""
-    files = _outside_snapshot(tmp_path, [root])
+    files = _outside_snapshot(tmp_path, [root, *also_mutable])
     dirs = {"": tmp_path.stat().st_mtime_ns}
     dirs.update({rel: (tmp_path / rel).stat().st_mtime_ns
                  for rel, kind in files.items() if kind == "dir"})
@@ -194,3 +195,78 @@ def test_manager_writes_only_under_root(mgr: Mgr, tmp_path: Path):
     history = mgr.root / "projects" / "demo" / "history"
     assert not (history / "state").exists()
     assert not list((history / "tmp").iterdir())
+
+
+# ---------------------------------------------------------------- identidade real
+
+
+@pytest.fixture
+def mgr2(tmp_path: Path):
+    """Manager com a config ``version: 2`` (identidade real, provisionador local)."""
+    from tests.manager.identity_http import KEYGEN
+    from tests.sshsig_signer import generate_key
+
+    m = Mgr(tmp_path)
+    m.cfg.parent.mkdir()
+    generate_key(KEYGEN, tmp_path / "hostkey", "ssh_host_ed25519_key")
+    m.cfg.write_text(json.dumps({
+        "version": 2, "root": str(m.root), "shared_group": "tsm-readers",
+        "workspace_group": "tsm-ws", "provisioner": {"mode": "local"},
+        "ssh": {"host": "127.0.0.1",
+                "host_key_files": [str(tmp_path / "hostkey" / "ssh_host_ed25519_key.pub")]},
+        "auth": {"ssh_keygen": str(KEYGEN)},
+        "projects": [{"id": "demo"}],
+    }), encoding="utf-8")
+    shutil.copytree(DEMO, tmp_path / "src")
+    for d in (m.cwd, tmp_path / "home", tmp_path / "systmp"):
+        d.mkdir()
+        (d / "sentinela.txt").write_text("intocado\n", encoding="utf-8")
+    yield m
+    m.stop()
+
+
+def test_identity_flow_writes_only_under_root(mgr2: Mgr, tmp_path: Path):
+    from tests.manager.identity_http import Device
+
+    client = tmp_path / "client"  # chaves dos dispositivos: lado do Client, fora do servidor
+    admin = Device.create(mgr2.port, client / "admin", 1, "Admin")
+    dev = Device.create(mgr2.port, client / "dev", 2, "Dev")
+    mgr2.root.mkdir()  # a raiz em si é do operador; o teste confere o que vem depois
+    before = _outside_state(tmp_path, mgr2.root, client)
+
+    mgr2.run("migrate")
+    mgr2.run("init-project", "--project", "demo", "--from", str(tmp_path / "src"))
+    boot = json.loads(mgr2.run("bootstrap-admin", "--project", "demo", "--json"))
+    mgr2.start()
+    assert admin.register(boot["code"], display_name="Admin").status == 201
+    mgr2.run("requests", "approve", admin.device_id, "--fingerprint", admin.fingerprint)
+    assert admin.login().status == 200
+    code = admin.post("/admin/invites", {"project": "demo"}).body["code"]
+    assert dev.register(code, display_name="Dev").status == 201
+    assert admin.post(f"/admin/requests/{dev.device_id}/approve",
+                      {"fingerprint": dev.fingerprint}).status == 200
+    assert dev.login().status == 200
+    cfg = dev.get("/connection/config?project=demo").body
+    tree = Path(cfg["paths"]["workspace"])
+    data = b"mana = 3\n"
+    (tree / SPELLS).parent.mkdir(parents=True, exist_ok=True)
+    (tree / SPELLS).write_bytes(data)
+    head = dev.get("/projects/demo").body["head"]["commit"]
+    out = dev.post(f"/projects/demo/bindings/{cfg['binding_id']}/publish", {
+        "idempotency_key": str(uuid.uuid4()), "base": {"commit": head},
+        "rules_digest": rules_digest(ProjectRules()),
+        "changes": [{"path": SPELLS, "op": "put", "sha256": sha(data), "size": len(data)}]})
+    assert out.body["status"] == "published", out
+    assert admin.post(f"/admin/devices/{dev.device_id}/revoke").body["ssh"] == "done"
+    assert dev.get("/me").status == 401
+    mgr2.stop()
+    assert "recover: ok" in mgr2.run("recover")
+    assert "verify: ok" in mgr2.run("verify")
+
+    after = _outside_state(tmp_path, mgr2.root, client)
+    assert after[0] == before[0], "arquivos fora de <root> mudaram"
+    changed = sorted(d for d in before[1] if after[1].get(d) != before[1][d])
+    assert not changed, f"diretórios fora de <root> modificados: {changed}"
+    manager_dir = mgr2.root / "manager"
+    assert (manager_dir / "local-accounts").is_dir()
+    assert not list((manager_dir / "tmp" / "sshsig").iterdir())

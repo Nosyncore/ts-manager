@@ -1,16 +1,19 @@
 """Fonte dos vínculos de um projeto (dispositivo ↔ workspace).
 
 O ``ProjectService`` e a API consultam os vínculos só por esta interface. ``ConfigBindings``
-lê a config do Manager; ``DbBindings`` lê ``workspace_bindings`` (vínculos criados na
-aprovação de dispositivos) e a substitui sem mudar quem consulta.
+lê a config ``version: 1`` (identidade de teste, será removida); ``DbBindings`` lê
+``workspace_bindings`` (vínculos criados na aprovação de dispositivos). A fonte também diz
+onde fica o diretório sincronizado de cada vínculo.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Protocol
 
 from tsm_manager.config import BindingConfig, ProjectConfig
 from tsm_manager.db.repository import Binding, Repository
+from tsm_manager.layout import ProjectLayout
 
 
 class BindingSource(Protocol):
@@ -20,6 +23,10 @@ class BindingSource(Protocol):
 
     def for_device(self, device: str) -> BindingConfig | None:
         """O vínculo do dispositivo neste projeto (no máximo um), ou ``None``."""
+        ...
+
+    def workspace_path(self, layout: ProjectLayout, binding: BindingConfig) -> Path:
+        """Diretório sincronizado do vínculo, de onde a publicação copia os arquivos."""
         ...
 
 
@@ -34,6 +41,9 @@ class ConfigBindings:
 
     def for_device(self, device: str) -> BindingConfig | None:
         return next((b for b in self._by_id.values() if b.device == device), None)
+
+    def workspace_path(self, layout: ProjectLayout, binding: BindingConfig) -> Path:
+        return layout.workspace(binding.workspace)
 
 
 def _config(binding: Binding | None) -> BindingConfig | None:
@@ -59,3 +69,7 @@ class DbBindings:
     def for_device(self, device: str) -> BindingConfig | None:
         with self._repo.read() as tx:
             return _config(tx.binding_for(self.project_id, device))
+
+    def workspace_path(self, layout: ProjectLayout, binding: BindingConfig) -> Path:
+        """``workspaces/<conta>/tree``: o portão da conta guarda a raiz sincronizada."""
+        return layout.sync_root(binding.workspace)

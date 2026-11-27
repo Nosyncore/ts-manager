@@ -172,6 +172,7 @@ def test_authenticate_returns_the_principal(ctx):
             principal.fingerprint, principal.session_id) == (
         "u1", "dev-u1", "admin", "full", fp(), issued.session_id)
     assert principal.is_admin and principal.is_full
+    assert principal.expires_at == ts(issued.expires_at)
 
 
 def test_revoked_device_loses_access_on_the_next_request(ctx):

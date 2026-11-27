@@ -26,3 +26,20 @@ def test_bindings_from_the_database(ctx):
 def test_db_bindings_satisfy_the_interface(ctx):
     source: BindingSource = DbBindings(ctx.repo, "demo")
     assert source.get("x") is None
+
+
+def test_workspace_path_by_source(ctx, tmp_path):
+    from tsm_common.rules import ProjectRules
+    from tsm_manager.bindings import ConfigBindings
+    from tsm_manager.config import Limits, ProjectConfig
+    from tsm_manager.layout import ProjectLayout
+
+    layout = ProjectLayout(tmp_path / "srv", "demo")
+    seed_user(ctx, "u1", project="demo")
+    db = DbBindings(ctx.repo, "demo")
+    binding = db.get("b-dev-u1")
+    assert db.workspace_path(layout, binding) == layout.sync_root(binding.workspace)
+    assert db.workspace_path(layout, binding).name == "tree"
+    cfg = ConfigBindings(ProjectConfig("demo", ProjectRules(), Limits(), {
+        "demo-pca": BindingConfig("demo-pca", "pca", "pca")}))
+    assert cfg.workspace_path(layout, cfg.get("demo-pca")) == layout.workspace("pca")

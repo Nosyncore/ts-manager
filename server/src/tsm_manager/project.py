@@ -87,10 +87,31 @@ def binding_ref(binding_id: str) -> str:
     return f"{BINDING_PREFIX}{binding_id}"
 
 
-def _author(identity: Identity | None, device: str | None = None) -> Author:
-    name = identity.name if identity else "tsm-manager"
-    host = device or (identity.device if identity else None) or "manager"
-    return Author(name=name, email=f"{name}@{host}.tsm")
+@dataclass(frozen=True)
+class Requester:
+    """Quem pede a operação: ``name`` para leitura humana, ids para auditoria."""
+
+    name: str
+    user_id: str
+    device_id: str | None
+    is_admin: bool
+
+    @classmethod
+    def of(cls, who: Requester | Identity) -> Requester:
+        if isinstance(who, Requester):
+            return who
+        return cls(who.name, who.name, who.device, who.is_admin)
+
+    @property
+    def user_id_trailer(self) -> str | None:
+        return self.user_id if self.user_id != self.name else None
+
+
+def _author(who: Requester | None) -> Author:
+    if who is None:
+        return Author(name="tsm-manager", email="tsm-manager@manager.tsm")
+    name = "".join(ch for ch in who.name if ch not in "<>").strip() or who.user_id
+    return Author(name=name, email=f"{who.user_id}@{who.device_id or 'manager'}.tsm")
 
 
 def _message(title: str, trailers: dict[str, Any]) -> str:
@@ -257,7 +278,9 @@ class ProjectService:
 
     # ================================================================ publicação
 
-    def publish(self, identity: Identity, binding: BindingConfig, body: Any) -> Outcome:
+    def publish(self, identity: Requester | Identity, binding: BindingConfig,
+                body: Any) -> Outcome:
+        identity = Requester.of(identity)
         try:
             req = parse_publish_request(body)
         except RequestError as exc:
@@ -281,14 +304,14 @@ class ProjectService:
                 if outcome.status != P.PUBLISHED:  # publicado é registrado pelo diário
                     self._record(req.idempotency_key, request_hash, outcome)
                     self.store.audit("publish", result=outcome.status, binding=binding.id,
-                                     user=identity.name, device=identity.device,
+                                     user=identity.user_id, device=identity.device_id,
                                      key=req.idempotency_key,
                                      paths=[c.path for c in req.changes][:200])
                 return outcome
         except LockTimeout:
             return Outcome(P.BUSY, {"message": "projeto ocupado; repita com a mesma chave"})
 
-    def _publish_locked(self, identity: Identity, binding: BindingConfig, req: PublishRequest,
+    def _publish_locked(self, identity: Requester, binding: BindingConfig, req: PublishRequest,
                         request_hash: str) -> Outcome:
         git = self.git
         if req.rules_digest != rules_digest(self.project.rules):
@@ -313,7 +336,7 @@ class ProjectService:
         # ---- staging: cópia do workspace com SHA-256 da cópia
         pub_id = uuid.uuid4().hex
         stage = self.layout.staging / pub_id
-        workspace = self.layout.workspace(binding.workspace)
+        workspace = self.bindings.workspace_path(self.layout, binding)
         try:
             mismatched: list[dict[str, str]] = []
             staged: dict[str, Path] = {}
@@ -357,7 +380,8 @@ class ProjectService:
             collisions = find_collisions(list(git.ls_tree(tree_c)))
             if collisions:
                 return Outcome(P.REJECTED, {"errors": _issues(collisions)})
-            trailers = {"Kind": "change", "User": identity.name, "Device": identity.device,
+            trailers = {"Kind": "change", "User": identity.name,
+                        "User-Id": identity.user_id_trailer, "Device": identity.device_id,
                         "Binding": binding.id, "Publication": req.idempotency_key}
             commit_c = git.commit_tree(tree_c, [base], _message(req.message or "publicação",
                                                                 trailers),
@@ -402,8 +426,9 @@ class ProjectService:
                 "request_hash": request_hash, "commit": commit_m, "revision": revision,
                 "refs": [[MAIN, commit_m, main], [bref, commit_c, current]],
                 "result": result,
-                "audit": {"binding": binding.id, "user": identity.name,
-                          "device": identity.device, "paths": [c.path for c in req.changes][:200]},
+                "audit": {"binding": binding.id, "user": identity.user_id,
+                          "device": identity.device_id,
+                          "paths": [c.path for c in req.changes][:200]},
                 "at": now_iso(),
             }
             self._commit_operation(journal)
@@ -416,7 +441,8 @@ class ProjectService:
 
     # ================================================================ rollback
 
-    def rollback(self, identity: Identity, body: Any) -> Outcome:
+    def rollback(self, identity: Requester | Identity, body: Any) -> Outcome:
+        identity = Requester.of(identity)
         if not identity.is_admin:
             return Outcome(P.FORBIDDEN, {"message": "rollback exige admin"})
         if not isinstance(body, dict):
@@ -454,14 +480,16 @@ class ProjectService:
                 commit = self.git.commit_tree(tree, [main], _message(
                     message or f"rollback para r{target}",
                     {"Revision": revision, "Kind": "rollback", "User": identity.name,
-                     "Rollback-To": target, "Publication": key}), _author(identity))
+                     "User-Id": identity.user_id_trailer, "Rollback-To": target,
+                     "Publication": key}), _author(identity))
                 result = {"status": P.PUBLISHED, "revision": revision, "commit": commit,
                           "rollback_to": target}
                 self._commit_operation({
                     "id": uuid.uuid4().hex, "kind": "rollback", "key": key,
                     "request_hash": request_hash, "commit": commit, "revision": revision,
                     "refs": [[MAIN, commit, main]], "result": result,
-                    "audit": {"user": identity.name, "rollback_to": target}, "at": now_iso(),
+                    "audit": {"user": identity.user_id, "rollback_to": target},
+                    "at": now_iso(),
                 })
                 final = dict(self.store.get_result(key)["result"])
                 final.pop("status")
@@ -605,7 +633,8 @@ def open_project(root: Path, project: ProjectConfig, db: Database, *,
                  shared_group: str | None = None, git_executable: str = "git",
                  faults: Faults | None = None, lock_timeout: float = LOCK_TIMEOUT,
                  bindings: BindingSource | None = None) -> ProjectService:
-    """``ProjectService`` com Git interno, ``Store`` no banco e vínculos da config."""
+    """``ProjectService`` com Git interno, ``Store`` no banco e a fonte de vínculos dada
+    (padrão: os da config ``version: 1``; com identidade real, ``DbBindings``)."""
     layout = ProjectLayout(root, project.id)
     git = Git(layout.repo, executable=git_executable, global_config=layout.git_global_config,
               tmp_dir=layout.tmp)

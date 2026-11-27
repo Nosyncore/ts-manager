@@ -72,6 +72,7 @@ class Principal:
     device_id: str
     fingerprint: str
     scope: str
+    expires_at: str | None = None  # formato do banco (UTC, ``…Z``)
 
     @property
     def is_admin(self) -> bool:

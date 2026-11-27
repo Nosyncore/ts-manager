@@ -121,7 +121,7 @@ def authenticate(ctx: IdentityContext, token: object) -> Principal:
     if ctx.now() >= parse_ts(session.expires_at):
         raise IdentityError(P.SESSION_EXPIRED, "sessão expirada")
     return Principal(session.id, user.id, user.role, device.id, device.fingerprint,
-                     session.scope)
+                     session.scope, session.expires_at)
 
 
 def logout(ctx: IdentityContext, principal: Principal) -> None:
