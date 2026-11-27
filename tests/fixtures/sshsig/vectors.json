@@ -1,0 +1,154 @@
+{
+  "source": "generate.py: ssh-keygen -t ed25519 e -Y sign (OpenSSH_10.2p1, OpenSSL 3.5.5 27 Jan 2026); só chaves públicas e assinaturas",
+  "namespace": "ts-manager-auth",
+  "keys": {
+    "a": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+    "b": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKbxgkXb4piXu/PHcrV4aik6BR840at0sq2tlrTusqqT dev-b"
+  },
+  "cases": [
+    {
+      "name": "valid_login",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+      "message": {
+        "server_id": "5e1f0000-0000-4000-8000-00000000c0de",
+        "purpose": "login",
+        "challenge_id": "c4a11e00-0000-4000-8000-000000000001",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "fingerprint": "SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ",
+        "expires": "2026-11-27T12:00:00Z"
+      },
+      "message_text": "tsm-auth-v1\nserver: 5e1f0000-0000-4000-8000-00000000c0de\npurpose: login\nchallenge: c4a11e00-0000-4000-8000-000000000001\nnonce: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\nkey: SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ\nexpires: 2026-11-27T12:00:00Z\n",
+      "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgNpUwh7J0QIWMPqa5CNQgPqiK3T\nUbFXqbp9T/suzjIpMAAAAPdHMtbWFuYWdlci1hdXRoAAAAAAAAAAZzaGE1MTIAAABTAAAA\nC3NzaC1lZDI1NTE5AAAAQBtyQVPE4yObKqU6LpuIWiKtWZYepSt3HIuGSePLHrDI/7bynX\nvXGi7yOwgRsboXJnhFUFehlHjcEVH/37IouAw=\n-----END SSH SIGNATURE-----\n",
+      "valid": true,
+      "rejected_by": null
+    },
+    {
+      "name": "valid_register",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+      "message": {
+        "server_id": "5e1f0000-0000-4000-8000-00000000c0de",
+        "purpose": "register",
+        "challenge_id": "c4a11e00-0000-4000-8000-000000000001",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "fingerprint": "SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ",
+        "expires": "2026-11-27T12:00:00Z"
+      },
+      "message_text": "tsm-auth-v1\nserver: 5e1f0000-0000-4000-8000-00000000c0de\npurpose: register\nchallenge: c4a11e00-0000-4000-8000-000000000001\nnonce: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\nkey: SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ\nexpires: 2026-11-27T12:00:00Z\n",
+      "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgNpUwh7J0QIWMPqa5CNQgPqiK3T\nUbFXqbp9T/suzjIpMAAAAPdHMtbWFuYWdlci1hdXRoAAAAAAAAAAZzaGE1MTIAAABTAAAA\nC3NzaC1lZDI1NTE5AAAAQD6gviwc8CCBnlNkWaME3P6oQ4xqNvi3B7rp5YPpz2HYdHMOY1\nBQ/4Eeg9rxXKbah5/o5dvZvH4FKiPigQU0lAo=\n-----END SSH SIGNATURE-----\n",
+      "valid": true,
+      "rejected_by": null
+    },
+    {
+      "name": "other_namespace",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+      "message": {
+        "server_id": "5e1f0000-0000-4000-8000-00000000c0de",
+        "purpose": "login",
+        "challenge_id": "c4a11e00-0000-4000-8000-000000000001",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "fingerprint": "SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ",
+        "expires": "2026-11-27T12:00:00Z"
+      },
+      "message_text": "tsm-auth-v1\nserver: 5e1f0000-0000-4000-8000-00000000c0de\npurpose: login\nchallenge: c4a11e00-0000-4000-8000-000000000001\nnonce: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\nkey: SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ\nexpires: 2026-11-27T12:00:00Z\n",
+      "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgNpUwh7J0QIWMPqa5CNQgPqiK3T\nUbFXqbp9T/suzjIpMAAAAPb3RoZXItbmFtZXNwYWNlAAAAAAAAAAZzaGE1MTIAAABTAAAA\nC3NzaC1lZDI1NTE5AAAAQFgW/WC5rSpqY8jU4Xh8EhaOnXDPEY3V+o4NqilfxozL+mBXMN\n0JvodqY7GEGQJVxvzTLfQqtNv8PXRpN99Nlg8=\n-----END SSH SIGNATURE-----\n",
+      "valid": false,
+      "rejected_by": "ssh-keygen"
+    },
+    {
+      "name": "other_message",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+      "message": {
+        "server_id": "5e1f0000-0000-4000-8000-00000000c0de",
+        "purpose": "login",
+        "challenge_id": "c4a11e00-0000-4000-8000-000000000001",
+        "nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8",
+        "fingerprint": "SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ",
+        "expires": "2026-11-27T12:00:00Z"
+      },
+      "message_text": "tsm-auth-v1\nserver: 5e1f0000-0000-4000-8000-00000000c0de\npurpose: login\nchallenge: c4a11e00-0000-4000-8000-000000000001\nnonce: ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8\nkey: SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ\nexpires: 2026-11-27T12:00:00Z\n",
+      "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgNpUwh7J0QIWMPqa5CNQgPqiK3T\nUbFXqbp9T/suzjIpMAAAAPdHMtbWFuYWdlci1hdXRoAAAAAAAAAAZzaGE1MTIAAABTAAAA\nC3NzaC1lZDI1NTE5AAAAQBtyQVPE4yObKqU6LpuIWiKtWZYepSt3HIuGSePLHrDI/7bynX\nvXGi7yOwgRsboXJnhFUFehlHjcEVH/37IouAw=\n-----END SSH SIGNATURE-----\n",
+      "valid": false,
+      "rejected_by": "ssh-keygen"
+    },
+    {
+      "name": "other_key",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+      "message": {
+        "server_id": "5e1f0000-0000-4000-8000-00000000c0de",
+        "purpose": "login",
+        "challenge_id": "c4a11e00-0000-4000-8000-000000000001",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "fingerprint": "SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ",
+        "expires": "2026-11-27T12:00:00Z"
+      },
+      "message_text": "tsm-auth-v1\nserver: 5e1f0000-0000-4000-8000-00000000c0de\npurpose: login\nchallenge: c4a11e00-0000-4000-8000-000000000001\nnonce: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\nkey: SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ\nexpires: 2026-11-27T12:00:00Z\n",
+      "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgpvGCRdvimJe788dytXhqKToFHz\njRq3Syra2WtO6yqpMAAAAPdHMtbWFuYWdlci1hdXRoAAAAAAAAAAZzaGE1MTIAAABTAAAA\nC3NzaC1lZDI1NTE5AAAAQIDFHwDgyaZBJURHgESdEE6+bcksO+foedpnl8TyzyXxdDFHtT\nUkM/z00/upRYbwfe0eYiNrhItNsBIKomFsEAc=\n-----END SSH SIGNATURE-----\n",
+      "valid": false,
+      "rejected_by": "ssh-keygen"
+    },
+    {
+      "name": "other_server_id",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+      "message": {
+        "server_id": "5e1f0000-0000-4000-8000-00000000c0de",
+        "purpose": "login",
+        "challenge_id": "c4a11e00-0000-4000-8000-000000000001",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "fingerprint": "SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ",
+        "expires": "2026-11-27T12:00:00Z"
+      },
+      "message_text": "tsm-auth-v1\nserver: 5e1f0000-0000-4000-8000-00000000c0de\npurpose: login\nchallenge: c4a11e00-0000-4000-8000-000000000001\nnonce: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\nkey: SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ\nexpires: 2026-11-27T12:00:00Z\n",
+      "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgNpUwh7J0QIWMPqa5CNQgPqiK3T\nUbFXqbp9T/suzjIpMAAAAPdHMtbWFuYWdlci1hdXRoAAAAAAAAAAZzaGE1MTIAAABTAAAA\nC3NzaC1lZDI1NTE5AAAAQG1SX/ZPOFOGSPXbLRg/r7t82jmiRgCGCMmxia60shNS7nr84g\np/OzGrkBElxmzdxo/oFSFbJGcSr4KgSFCziQw=\n-----END SSH SIGNATURE-----\n",
+      "valid": false,
+      "rejected_by": "ssh-keygen"
+    },
+    {
+      "name": "other_purpose",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+      "message": {
+        "server_id": "5e1f0000-0000-4000-8000-00000000c0de",
+        "purpose": "login",
+        "challenge_id": "c4a11e00-0000-4000-8000-000000000001",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "fingerprint": "SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ",
+        "expires": "2026-11-27T12:00:00Z"
+      },
+      "message_text": "tsm-auth-v1\nserver: 5e1f0000-0000-4000-8000-00000000c0de\npurpose: login\nchallenge: c4a11e00-0000-4000-8000-000000000001\nnonce: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\nkey: SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ\nexpires: 2026-11-27T12:00:00Z\n",
+      "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgNpUwh7J0QIWMPqa5CNQgPqiK3T\nUbFXqbp9T/suzjIpMAAAAPdHMtbWFuYWdlci1hdXRoAAAAAAAAAAZzaGE1MTIAAABTAAAA\nC3NzaC1lZDI1NTE5AAAAQD6gviwc8CCBnlNkWaME3P6oQ4xqNvi3B7rp5YPpz2HYdHMOY1\nBQ/4Eeg9rxXKbah5/o5dvZvH4FKiPigQU0lAo=\n-----END SSH SIGNATURE-----\n",
+      "valid": false,
+      "rejected_by": "ssh-keygen"
+    },
+    {
+      "name": "truncated_armor",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+      "message": {
+        "server_id": "5e1f0000-0000-4000-8000-00000000c0de",
+        "purpose": "login",
+        "challenge_id": "c4a11e00-0000-4000-8000-000000000001",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "fingerprint": "SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ",
+        "expires": "2026-11-27T12:00:00Z"
+      },
+      "message_text": "tsm-auth-v1\nserver: 5e1f0000-0000-4000-8000-00000000c0de\npurpose: login\nchallenge: c4a11e00-0000-4000-8000-000000000001\nnonce: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\nkey: SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ\nexpires: 2026-11-27T12:00:00Z\n",
+      "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgNpUwh7J0QIWMPqa5CNQgPqiK3T\nUbFXqbp9T/suzjIpMAAAAPdHMtbWFuYWdlci1hdXRoAAAAAAAAAAZzaGE1MTIAAABTAAAA\nC3NzaC1lZDI1NTE5AAAAQBtyQVPE4yObKqU6LpuIWiKtWZYepSt3HIuGSePLHrDI/7bynX\nvXGi7yOwgRsboXJnhFUFehlHjcEVH/37IouAw=\n",
+      "valid": false,
+      "rejected_by": "validation"
+    },
+    {
+      "name": "truncated_body",
+      "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDaVMIeydECFjD6muQjUID6oit01GxV6m6fU/7Ls4yKT dev-a",
+      "message": {
+        "server_id": "5e1f0000-0000-4000-8000-00000000c0de",
+        "purpose": "login",
+        "challenge_id": "c4a11e00-0000-4000-8000-000000000001",
+        "nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+        "fingerprint": "SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ",
+        "expires": "2026-11-27T12:00:00Z"
+      },
+      "message_text": "tsm-auth-v1\nserver: 5e1f0000-0000-4000-8000-00000000c0de\npurpose: login\nchallenge: c4a11e00-0000-4000-8000-000000000001\nnonce: AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8\nkey: SHA256:rOwXJiuhZSXZmkuc3l0Xb1DHPrldJiM9KYwWe0NRQnQ\nexpires: 2026-11-27T12:00:00Z\n",
+      "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgNpUwh7J0QIWMPqa5CNQgPqiK3T\nUbFXqbp9T/suzjIpMAAAAPdHMtbWFuYWdlci1hdXRoAAAAAAAAAAZzaGE1MTIAAABTAAAA\nC3NzaC1lZDI1NTE5AAAAQBtyQVPE4yObKqU6LpuIWiKtWZYepSt3HIuGSePL\n-----END SSH SIGNATURE-----\n",
+      "valid": false,
+      "rejected_by": "ssh-keygen"
+    }
+  ]
+}

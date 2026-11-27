@@ -15,9 +15,7 @@ import random
 import shutil
 import statistics
 import sys
-import tempfile
 import time
-import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,11 +25,11 @@ import pytest
 from tests.conftest import REPO_ROOT
 from tests.integration.conftest import wait_until, write_config
 from tests.integration_ssh.conftest import (
+    API_PORT,
     DEVS,
-    IMAGE,
-    PLATFORM,
     REMOTE_PROJECT,
-    Container,
+    VENV,
+    MgrContainer,
     docker,
     make_ssh_home,
 )
@@ -42,67 +40,9 @@ from tsm_manager.auth import token_sha256
 
 pytestmark = [pytest.mark.ssh, pytest.mark.timeout(1800)]
 
-MANAGER_IMAGE = f"tsm-manager-test:{PLATFORM.split('/')[-1]}"
-VENV = "/opt/tsm-venv/bin"
-API_PORT, RELAY_PORT = 8740, 8741
 SPELLS = "data/scripts/spells.lua"
 CREATURES = "data/scripts/creatures.lua"
 DEMO = REPO_ROOT / "examples" / "demo-project"
-
-
-# ---------------------------------------------------------------- contêiner com Manager
-
-
-@dataclass
-class MgrContainer(Container):
-    api_port: int = 0
-
-    def manager(self, *args: str, check: bool = True):
-        return self.sh(f"{VENV}/tsm-manager " + " ".join(args), user="tsm-manager",
-                       check=check, timeout=600)
-
-
-@pytest.fixture(scope="session")
-def manager_image(sshd) -> str:
-    if docker("image", "inspect", MANAGER_IMAGE, check=False).returncode == 0 and not \
-            os.environ.get("TSM_REBUILD_MANAGER_IMAGE"):
-        return MANAGER_IMAGE
-    with tempfile.TemporaryDirectory(prefix="tsm-mgr-ctx-") as ctx:
-        ign = shutil.ignore_patterns("*.egg-info", "__pycache__", "build", "dist")
-        shutil.copytree(REPO_ROOT / "common", Path(ctx) / "common", ignore=ign)
-        shutil.copytree(REPO_ROOT / "server", Path(ctx) / "server", ignore=ign)
-        shutil.copy(REPO_ROOT / "tests" / "fixtures" / "manager" / "Dockerfile", ctx)
-        docker("build", "--platform", PLATFORM, "--build-arg", f"BASE={IMAGE}", "-t",
-               MANAGER_IMAGE, ctx, timeout=3600)
-    return MANAGER_IMAGE
-
-
-@pytest.fixture(scope="session")
-def mgr_container(manager_image) -> Iterator[MgrContainer]:
-    suffix = uuid.uuid4().hex[:8]
-    name, volume = f"tsm-mgr-{suffix}", f"tsm-mgr-srv-{suffix}"
-    docker("run", "-d", "--platform", PLATFORM, "--name", name, "--hostname", "tsm-sshd",
-           "-p", "127.0.0.1::22", "-p", f"127.0.0.1::{RELAY_PORT}", "-v", f"{volume}:/srv/ts",
-           manager_image)
-    try:
-        docker("cp", f"{DEMO}{os.sep}.", f"{name}:/opt/demo")
-        wait_until(lambda: docker("exec", name, "pgrep", "-x", "sshd",
-                                  check=False).returncode == 0, 60, 0.5, "sshd")
-
-        def mapped(port: int) -> int:
-            out = docker("port", name, f"{port}/tcp").stdout.strip().splitlines()[0]
-            return int(out.rsplit(":", 1)[1])
-
-        keys = docker("exec", name, "sh", "-c", "cat /etc/ssh/ssh_host_*_key.pub").stdout
-        c = MgrContainer(name, volume, mapped(22), [k for k in keys.splitlines() if k.strip()],
-                         api_port=mapped(RELAY_PORT))
-        # relay de teste: host 127.0.0.1:<mapeada> → contêiner :8741 → 127.0.0.1:8740
-        docker("exec", "-d", name, "socat", f"TCP-LISTEN:{RELAY_PORT},fork,reuseaddr",
-               f"TCP:127.0.0.1:{API_PORT}")
-        yield c
-    finally:
-        docker("rm", "-f", name, check=False)
-        docker("volume", "rm", "-f", volume, check=False)
 
 
 TOKENS = {"pca": "ssh-token-pca", "pcb": "ssh-token-pcb", "admin": "ssh-token-admin"}
