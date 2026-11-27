@@ -1,14 +1,17 @@
-"""Operações de transporte da PoC sobre o adaptador Mutagen.
+"""Operações de transporte sobre o adaptador Mutagen.
 
 A CLI (e, futuramente, a GUI) chamam este módulo; ele não executa subprocessos diretamente.
 Só toca sessões com ``tsm-managed=true`` cujo ``tsm-binding`` pertence à configuração.
+
+Com colaboração (config ``version: 2``), um vínculo ainda não inicializado (``tsm init``)
+só tem a sessão de download: a pasta local ainda não existe e o upload não pode espelhá-la.
 """
 
 from __future__ import annotations
 
 import hashlib
 import shutil
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -73,15 +76,21 @@ def resolve_executable(cfg: Config, cwd: Path | None = None) -> Path:
 
 
 class TransportService:
-    def __init__(self, cfg: Config, adapter: MutagenAdapter) -> None:
+    def __init__(self, cfg: Config, adapter: MutagenAdapter,
+                 initialized: Callable[[str], bool] | None = None) -> None:
         self.cfg = cfg
         self.adapter = adapter
         self._binding_ids = {b.id for b in cfg.bindings}
+        self._initialized = initialized or (lambda _binding_id: True)
 
     # ------------------------------------------------------------ consultas
 
     def specs(self) -> list[SyncSpec]:
-        return [s for b in self.cfg.bindings for s in build_specs(b)]
+        out = []
+        for b in self.cfg.bindings:
+            up, down = build_specs(b)
+            out += [up, down] if self._initialized(b.id) else [down]
+        return out
 
     def _is_ours(self, s: SessionState) -> bool:
         return (
@@ -114,7 +123,8 @@ class TransportService:
 
     def up(self) -> list[UpResult]:
         for b in self.cfg.bindings:
-            verify_project_folder(b)
+            if self._initialized(b.id):
+                verify_project_folder(b)
         specs = self.specs()
         self.adapter.daemon_start()
         all_sessions = self.adapter.list_sessions(label_selector=None)

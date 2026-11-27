@@ -66,8 +66,41 @@ def test_unknown_fields_rejected(tmp_path, cfg_data):
 
 
 def test_wrong_version(tmp_path, cfg_data):
-    cfg_data["version"] = 2
+    cfg_data["version"] = 3
     with pytest.raises(ConfigError, match="version"):
+        load_config(write(tmp_path / "c.json", cfg_data))
+
+
+def test_v2_requires_state_and_manager(tmp_path, cfg_data):
+    cfg_data["version"] = 2
+    with pytest.raises(ConfigError, match="state_directory"):
+        load_config(write(tmp_path / "c.json", cfg_data))
+
+
+def test_v2_fields(tmp_path, cfg_data):
+    cfg_data["version"] = 2
+    cfg_data["state_directory"] = "state"
+    cfg_data["manager"] = {"url": "http://127.0.0.1:8740/", "token_file": "tok"}
+    cfg = load_config(write(tmp_path / "c.json", cfg_data))
+    assert cfg.collab_enabled
+    assert cfg.manager.url == "http://127.0.0.1:8740"
+    assert cfg.state_directory == (tmp_path / "state").resolve()
+    assert cfg.manager.token_file == (tmp_path / "tok").resolve()
+
+
+def test_v2_state_directory_cannot_overlap(tmp_path, cfg_data):
+    cfg_data["version"] = 2
+    cfg_data["state_directory"] = cfg_data["bindings"][0]["local"] + "/state"
+    cfg_data["manager"] = {"url": "http://127.0.0.1:1", "token_file": "tok"}
+    with pytest.raises(ConfigError, match="state_directory"):
+        load_config(write(tmp_path / "c.json", cfg_data))
+
+
+def test_v2_manager_url_scheme(tmp_path, cfg_data):
+    cfg_data["version"] = 2
+    cfg_data["state_directory"] = "state"
+    cfg_data["manager"] = {"url": "ftp://x", "token_file": "tok"}
+    with pytest.raises(ConfigError, match="manager.url"):
         load_config(write(tmp_path / "c.json", cfg_data))
 
 

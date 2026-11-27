@@ -197,7 +197,7 @@ def test_mutagen_error_exit_code(env):
 def test_invalid_config_exit_code(env, tmp_path):
     env["cfg"].write_text("{}", encoding="utf-8")
     code, _, err = env["call"]("status")
-    assert code == EXIT_CONFIG and "configuração inválida" in err
+    assert code == EXIT_CONFIG and "configuração ou uso inválido" in err
 
 
 def test_doctor_missing_executable(env):

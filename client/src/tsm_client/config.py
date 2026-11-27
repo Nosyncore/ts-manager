@@ -19,6 +19,16 @@ Formato (JSON)::
       }]
     }
 
+Na ``version: 2`` entram ``state_directory`` (estado local por vínculo: base,
+armazenamento de conteúdo e lock) e ``manager`` (``url`` + ``token_file`` da
+identidade de teste), além de ``git`` (opcional, executável do Git)::
+
+    "state_directory": "pcA/state",
+    "manager": {"url": "http://127.0.0.1:8740", "token_file": "pcA/manager-token"},
+    "git": "C:/Program Files/Git/cmd/git.exe"
+
+Configs ``version: 1`` continuam válidas para os comandos de transporte.
+
 Caminhos locais relativos são resolvidos a partir do diretório do arquivo de config.
 """
 
@@ -35,10 +45,12 @@ from tsm_client.paths import Endpoint, PathError, canonical_local, endpoints_ove
 from tsm_client.rules import PROJECT_FILE, ProjectRules, RulesError
 from tsm_client.sessions import Binding, SessionRuleError
 
-CONFIG_VERSION = 1
+CONFIG_VERSIONS = (1, 2)
 PROJECT_FILE_VERSION = 1
 
 _TOP_FIELDS = {"version", "device_id", "mutagen", "bindings"}
+_TOP_FIELDS_V2 = _TOP_FIELDS | {"state_directory", "manager", "git"}
+_MANAGER_FIELDS = {"url", "token_file"}
 _MUTAGEN_FIELDS = {"data_directory", "executable", "ssh_path", "ssh_home"}
 _BINDING_FIELDS = {"id", "project_id", "local", "cache", "workspace", "shared", "rules"}
 _BINDING_REQUIRED = _BINDING_FIELDS - {"rules"}
@@ -57,11 +69,25 @@ class MutagenSettings:
 
 
 @dataclass(frozen=True)
+class ManagerSettings:
+    url: str
+    token_file: Path
+
+
+@dataclass(frozen=True)
 class Config:
     path: Path
     device_id: str
     mutagen: MutagenSettings
     bindings: tuple[Binding, ...]
+    version: int = 1
+    state_directory: Path | None = None
+    manager: ManagerSettings | None = None
+    git: str | None = None
+
+    @property
+    def collab_enabled(self) -> bool:
+        return self.state_directory is not None and self.manager is not None
 
 
 def _check_fields(obj: Any, where: str, allowed: set[str], required: set[str]) -> Mapping[str, Any]:
@@ -120,9 +146,14 @@ def load_config(path: str | os.PathLike[str]) -> Config:
         raise ConfigError(f"{cfg_path}: JSON inválido: {exc}") from exc
 
     base = cfg_path.resolve().parent
-    top = _check_fields(data, "config", _TOP_FIELDS, _TOP_FIELDS)
-    if top["version"] != CONFIG_VERSION:
-        raise ConfigError(f"config.version: suportado apenas {CONFIG_VERSION}")
+    version = data.get("version") if isinstance(data, dict) else None
+    if version not in CONFIG_VERSIONS:
+        raise ConfigError(f"config.version: suportadas {', '.join(map(str, CONFIG_VERSIONS))}")
+    if version == 1:
+        top = _check_fields(data, "config", _TOP_FIELDS, _TOP_FIELDS)
+    else:
+        top = _check_fields(data, "config", _TOP_FIELDS_V2,
+                            _TOP_FIELDS | {"state_directory", "manager"})
     device_id = _str(top, "device_id", "config")
 
     m = _check_fields(top["mutagen"], "mutagen", _MUTAGEN_FIELDS, {"data_directory"})
@@ -165,8 +196,29 @@ def load_config(path: str | os.PathLike[str]) -> Config:
     if len(set(ids)) != len(ids):
         raise ConfigError(f"config.bindings: id duplicado em {ids}")
 
-    for key in ("data_directory", "ssh_home"):
-        value = getattr(settings, key)
+    state_dir: Path | None = None
+    manager: ManagerSettings | None = None
+    git: str | None = None
+    if version == 2:
+        try:
+            state_dir = Path(_resolve_local(_str(top, "state_directory", "config"), base))
+        except PathError as exc:
+            raise ConfigError(f"config.state_directory: {exc}") from exc
+        mg = _check_fields(top["manager"], "manager", _MANAGER_FIELDS, _MANAGER_FIELDS)
+        url = _str(mg, "url", "manager").rstrip("/")
+        if not url.startswith(("http://", "https://")):
+            raise ConfigError("manager.url: use http:// ou https://")
+        try:
+            token_file = Path(_resolve_local(_str(mg, "token_file", "manager"), base))
+        except PathError as exc:
+            raise ConfigError(f"manager.token_file: {exc}") from exc
+        manager = ManagerSettings(url, token_file)
+        if top.get("git") not in (None, ""):
+            git = _str(top, "git", "config")
+
+    own_dirs = [("mutagen.data_directory", settings.data_directory),
+                ("mutagen.ssh_home", settings.ssh_home), ("state_directory", state_dir)]
+    for key, value in own_dirs:
         if value is None:
             continue
         own = Endpoint(None, str(value))
@@ -174,11 +226,12 @@ def load_config(path: str | os.PathLike[str]) -> Config:
             for ep in (b.local, b.cache, b.workspace, b.shared):
                 if endpoints_overlap(own, ep):
                     raise ConfigError(
-                        f"mutagen.{key} ({value}) não pode se sobrepor a endpoints ({ep.url})"
+                        f"{key} ({value}) não pode se sobrepor a endpoints ({ep.url})"
                     )
 
     return Config(path=cfg_path.resolve(), device_id=device_id, mutagen=settings,
-                  bindings=tuple(bindings))
+                  bindings=tuple(bindings), version=version, state_directory=state_dir,
+                  manager=manager, git=git)
 
 
 def verify_project_folder(binding: Binding) -> None:
