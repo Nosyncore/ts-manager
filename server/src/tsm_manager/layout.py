@@ -1,4 +1,8 @@
-"""Layout de um projeto no servidor."""
+"""Layout de um projeto no servidor.
+
+O estado que o Git não guarda fica no banco do Manager (``<root>/manager/``); sob
+``history/`` ficam só o repositório, o diário das operações e os temporários.
+"""
 
 from __future__ import annotations
 
@@ -52,15 +56,11 @@ class ProjectLayout:
         return self.history / "journal"
 
     @property
-    def state(self) -> Path:
-        return self.history / "state"
-
-    @property
     def lock(self) -> Path:
         return self.history / "lock"
 
     def ensure_history(self) -> None:
-        for d in (self.history, self.staging, self.tmp, self.journal, self.state):
+        for d in (self.history, self.staging, self.tmp, self.journal):
             d.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             self.history.chmod(0o700)

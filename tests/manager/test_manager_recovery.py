@@ -14,10 +14,10 @@ from tests.manager.conftest import (
     main_files,
     make_project,
     refs,
+    reopen,
     shared_files,
 )
 from tsm_manager.faults import Faults, SimulatedCrash
-from tsm_manager.project import ProjectService
 
 pytestmark = pytest.mark.integration
 
@@ -44,7 +44,7 @@ def test_crash_before_update_ref_is_discarded(tmp_path):
     assert refs(svc) == before
     assert list(svc.layout.journal.glob("*.json"))  # diário ficou
     faults.crash = None
-    notes = ProjectService(svc.layout.root, svc.project).recover()
+    notes = reopen(svc).recover()
     assert any("descartada" in n for n in notes)
     assert_shared_is_main(svc)
     # o Client reenvia com a mesma chave: o Manager reexecuta e publica uma vez só
@@ -64,7 +64,7 @@ def test_crash_after_update_ref_is_completed(tmp_path, crash):
     if crash == "during_materialize":
         assert shared_files(svc) != main_files(svc)
     faults.crash = None
-    restarted = ProjectService(svc.layout.root, svc.project)
+    restarted = reopen(svc)
     notes = restarted.recover()
     assert any("concluída (r2)" in n for n in notes)
     assert_shared_is_main(restarted)

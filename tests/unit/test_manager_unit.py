@@ -9,6 +9,7 @@ import pytest
 from tsm_common.rules import ProjectRules, rules_digest
 from tsm_manager.adapters.git import is_binary
 from tsm_manager.auth import authenticate, can_read, owns_binding, token_sha256
+from tsm_manager.bindings import ConfigBindings
 from tsm_manager.cli import is_loopback
 from tsm_manager.config import (
     BindingConfig,
@@ -134,10 +135,13 @@ def test_authenticate(tmp_path):
 def test_authorization(tmp_path):
     cfg = _cfg(tmp_path)
     project = cfg.projects["demo"]
+    bindings = ConfigBindings(project)
     a = authenticate(cfg, "Bearer tok-a")
     x = authenticate(cfg, "Bearer tok-x")
     admin = authenticate(cfg, "Bearer tok-admin")
-    assert can_read(a, project) and can_read(admin, project) and not can_read(x, project)
+    assert can_read(a, bindings) and can_read(admin, bindings) and not can_read(x, bindings)
+    assert bindings.for_device("pca").id == "demo-pca" and bindings.for_device("pcx") is None
+    assert bindings.get("demo-pcb").device == "pcb" and bindings.get("nope") is None
     assert owns_binding(a, project.bindings["demo-pca"])
     assert not owns_binding(a, project.bindings["demo-pcb"])
     assert not owns_binding(admin, project.bindings["demo-pca"])
@@ -156,6 +160,33 @@ def test_config_ok(tmp_path):
     assert cfg.root == (tmp_path / "srv").resolve()
     assert cfg.projects["demo"].limits == Limits()
     assert set(cfg.projects["demo"].bindings) == {"demo-pca", "demo-pcb"}
+    assert cfg.database == cfg.root / "manager" / "manager.db"
+    assert cfg.backups == cfg.root / "manager" / "backups"
+
+
+def _cfg_with_database(tmp_path, database):
+    data = {"version": 1, "root": "srv", "database": database,
+            "projects": [{"id": "demo", "bindings": []}], "identities": []}
+    p = tmp_path / "m.json"
+    p.write_text(json.dumps(data), encoding="utf-8")
+    return load_manager_config(p)
+
+
+def test_config_database_under_root(tmp_path):
+    root = (tmp_path / "srv").resolve()
+    assert _cfg_with_database(tmp_path, "db/x.db").database == root / "db" / "x.db"
+    assert _cfg_with_database(tmp_path, str(root / "y.db")).database == root / "y.db"
+
+
+@pytest.mark.parametrize("database", ["../fora.db", "", ".", "manager/../../fora.db", 7])
+def test_config_database_outside_root_rejected(tmp_path, database):
+    with pytest.raises(ManagerConfigError, match="database"):
+        _cfg_with_database(tmp_path, database)
+
+
+def test_config_database_absolute_outside_root_rejected(tmp_path):
+    with pytest.raises(ManagerConfigError, match="fora de root"):
+        _cfg_with_database(tmp_path, str((tmp_path / "outro" / "m.db").resolve()))
 
 
 @pytest.mark.parametrize("mutate", [

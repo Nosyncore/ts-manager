@@ -7,6 +7,8 @@
   upgrade de lock no meio da transação.
 - Horários são texto UTC de largura fixa (``2026-11-26T12:00:00.000000Z``), comparáveis
   como texto no SQL.
+- Tabelas e índices temporários ficam em memória: o banco não grava fora do próprio
+  diretório (``-wal`` e ``-shm`` ficam ao lado do arquivo).
 """
 
 from __future__ import annotations
@@ -60,6 +62,7 @@ def open_connection(path: Path, *, busy_timeout_ms: int = DEFAULT_BUSY_TIMEOUT_M
             raise DatabaseError(f"não foi possível ativar WAL em {path} (modo {mode})")
         conn.execute("PRAGMA synchronous = FULL")
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA temp_store = MEMORY")  # nada no diretório temporário do sistema
     except BaseException:
         conn.close()
         raise

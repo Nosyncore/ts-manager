@@ -16,7 +16,10 @@ from tests.manager.conftest import (
     dev,
     main_files,
     make_project,
+    migrated_db,
+    open_service,
     refs,
+    reopen,
     sha,
 )
 from tsm_common.rules import ProjectRules
@@ -249,9 +252,7 @@ def test_idempotency(svc, a):
     other = dict(req, message="outra")
     assert svc.publish(a.identity, a.binding, other).status == "idempotency_mismatch"
     # depois de "reiniciar" o Manager (novo serviço sobre o mesmo diretório)
-    from tsm_manager.project import ProjectService
-
-    svc2 = ProjectService(svc.layout.root, svc.project)
+    svc2 = reopen(svc)
     assert svc2.publish(a.identity, a.binding, req).payload["revision"] == 2
     assert len(svc.revisions()) == 2
     # sem mudança
@@ -274,11 +275,10 @@ def test_content_already_in_main_is_no_change(svc, a, b):
 
 def _concurrent_publish(root: str, which: str, idx: int) -> str:
     from tsm_manager.config import BindingConfig, Limits, ProjectConfig
-    from tsm_manager.project import ProjectService
 
     project = ProjectConfig("demo", ProjectRules(), Limits(), {
         f"demo-{which}": BindingConfig(f"demo-{which}", which, which)})
-    svc = ProjectService(Path(root), project, lock_timeout=120)
+    svc = open_service(Path(root), project, lock_timeout=120)
     from tsm_manager.config import Identity
 
     ident = Identity(which, "developer", which, "d" * 64)
@@ -292,11 +292,11 @@ def _concurrent_publish(root: str, which: str, idx: int) -> str:
 def test_concurrent_publications_are_serialized(tmp_path):
     names = [f"p{i}" for i in range(8)]
     from tsm_manager.config import BindingConfig, Limits, ProjectConfig
-    from tsm_manager.project import ProjectService
+    from tsm_manager.project import open_project
 
     project = ProjectConfig("demo", ProjectRules(), Limits(), {
         f"demo-{n}": BindingConfig(f"demo-{n}", n, n) for n in names})
-    svc = ProjectService(tmp_path / "srv", project)
+    svc = open_project(tmp_path / "srv", project, migrated_db(tmp_path / "srv"))
     svc.init_project(Path(__file__).resolve().parents[2] / "examples" / "demo-project")
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(8) as pool:

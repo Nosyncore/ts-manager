@@ -3,6 +3,8 @@
 Repositório bare, só comandos de baixo nível, sem worktree. A configuração do sistema e
 a global do operador são ignoradas; fim de linha nunca é convertido; renomeações não são
 inferidas no merge (``merge.renames=false``): aparecem como exclusão + criação.
+Índices e arquivos de merge temporários ficam em ``tmp_dir`` (por padrão, ``tmp/`` ao lado
+do repositório), nunca no diretório temporário do sistema.
 """
 
 from __future__ import annotations
@@ -77,12 +79,18 @@ class CommitInfo:
 
 class Git:
     def __init__(self, git_dir: str | os.PathLike[str], *, executable: str = "git",
-                 global_config: str | os.PathLike[str] | None = None) -> None:
+                 global_config: str | os.PathLike[str] | None = None,
+                 tmp_dir: str | os.PathLike[str] | None = None) -> None:
         self.git_dir = Path(git_dir)
         self.executable = executable
         self._global_config = Path(global_config) if global_config else (
             self.git_dir.parent / "git-global.cfg"
         )
+        self.tmp_dir = Path(tmp_dir) if tmp_dir else self.git_dir.parent / "tmp"
+
+    def _tempdir(self, prefix: str) -> tempfile.TemporaryDirectory[str]:
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        return tempfile.TemporaryDirectory(prefix=prefix, dir=self.tmp_dir)
 
     # ------------------------------------------------------------ execução
 
@@ -180,7 +188,7 @@ class Git:
     def build_tree(self, base_tree: str | None, puts: Mapping[str, str],
                    deletes: Iterable[str] = ()) -> str:
         """Árvore = ``base_tree`` + ``puts`` (caminho → blob) − ``deletes``."""
-        with tempfile.TemporaryDirectory(prefix="tsm-index-") as tmp:
+        with self._tempdir("tsm-index-") as tmp:
             env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}
             if base_tree:
                 self.run("read-tree", base_tree, env=env)
@@ -242,7 +250,7 @@ class Git:
 
     def merge_file(self, ours: bytes, base: bytes, theirs: bytes) -> tuple[int, bytes]:
         """``git merge-file`` sobre bytes: ``(número de conflitos, resultado)``."""
-        with tempfile.TemporaryDirectory(prefix="tsm-merge-") as tmp:
+        with self._tempdir("tsm-merge-") as tmp:
             paths = []
             for name, data in (("ours", ours), ("base", base), ("theirs", theirs)):
                 f = Path(tmp) / name

@@ -9,6 +9,9 @@ Todas as operações que mudam refs rodam sob o lock do projeto e seguem a ordem
 validação → staging → objetos Git → diário (fsync) → ``update-ref`` atômico →
 materialização do shared → registro idempotente → fim do diário. A recuperação usa o
 diário para concluir ou descartar uma operação interrompida.
+
+O serviço recebe o ``Git``, o ``Store`` e a fonte de vínculos prontos; ``open_project``
+monta os três a partir da raiz do Manager e do banco.
 """
 
 from __future__ import annotations
@@ -37,7 +40,9 @@ from tsm_manager.adapters.fs import (
     scan_files,
 )
 from tsm_manager.adapters.git import Author, CommitInfo, Git
+from tsm_manager.bindings import BindingSource, ConfigBindings
 from tsm_manager.config import BindingConfig, Identity, ProjectConfig
+from tsm_manager.db.connection import Database
 from tsm_manager.faults import Faults
 from tsm_manager.layout import ProjectLayout
 from tsm_manager.store import Store, now_iso
@@ -95,14 +100,14 @@ def _message(title: str, trailers: dict[str, Any]) -> str:
 
 
 class ProjectService:
-    def __init__(self, root: Path, project: ProjectConfig, *, shared_group: str | None = None,
-                 git_executable: str = "git", faults: Faults | None = None,
-                 lock_timeout: float = LOCK_TIMEOUT) -> None:
+    def __init__(self, project: ProjectConfig, layout: ProjectLayout, *, git: Git, store: Store,
+                 bindings: BindingSource, shared_group: str | None = None,
+                 faults: Faults | None = None, lock_timeout: float = LOCK_TIMEOUT) -> None:
         self.project = project
-        self.layout = ProjectLayout(root, project.id)
-        self.git = Git(self.layout.repo, executable=git_executable,
-                       global_config=self.layout.git_global_config)
-        self.store = Store(self.layout.state)
+        self.layout = layout
+        self.git = git
+        self.store = store
+        self.bindings = bindings
         self.faults = faults or Faults()
         self.shared_group = shared_group
         self.lock_timeout = lock_timeout
@@ -594,6 +599,19 @@ class ProjectService:
     def binding_refs(self) -> dict[str, str]:
         return {r[len(BINDING_PREFIX):]: o for r, o in self.git.list_refs(
             BINDING_PREFIX.rstrip("/")).items()}
+
+
+def open_project(root: Path, project: ProjectConfig, db: Database, *,
+                 shared_group: str | None = None, git_executable: str = "git",
+                 faults: Faults | None = None, lock_timeout: float = LOCK_TIMEOUT,
+                 bindings: BindingSource | None = None) -> ProjectService:
+    """``ProjectService`` com Git interno, ``Store`` no banco e vínculos da config."""
+    layout = ProjectLayout(root, project.id)
+    git = Git(layout.repo, executable=git_executable, global_config=layout.git_global_config,
+              tmp_dir=layout.tmp)
+    return ProjectService(project, layout, git=git, store=Store(db, project.id),
+                          bindings=bindings or ConfigBindings(project),
+                          shared_group=shared_group, faults=faults, lock_timeout=lock_timeout)
 
 
 def _issues(issues: Iterable[PathIssue]) -> list[dict[str, str]]:

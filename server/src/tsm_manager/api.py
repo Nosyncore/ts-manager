@@ -13,9 +13,9 @@ from fastapi.responses import JSONResponse
 from tsm_common import protocol as P
 from tsm_manager import __version__
 from tsm_manager.auth import authenticate, can_read, owns_binding
-from tsm_manager.config import Identity, ManagerConfig
-from tsm_manager.faults import Faults
+from tsm_manager.config import Identity
 from tsm_manager.project import Outcome, ProjectService
+from tsm_manager.services import Manager
 
 
 def _error(status: str, message: str) -> JSONResponse:
@@ -25,27 +25,6 @@ def _error(status: str, message: str) -> JSONResponse:
 
 def _outcome(o: Outcome) -> JSONResponse:
     return JSONResponse(o.body(), status_code=o.http_status)
-
-
-class Manager:
-    """Serviços por projeto, construídos a partir da config."""
-
-    def __init__(self, cfg: ManagerConfig, *, faults: Faults | None = None,
-                 git_executable: str = "git") -> None:
-        self.cfg = cfg
-        faults = faults or Faults.from_env(cfg.test_faults)
-        self.projects = {
-            pid: ProjectService(cfg.root, p, shared_group=cfg.shared_group,
-                                git_executable=git_executable, faults=faults)
-            for pid, p in cfg.projects.items()
-        }
-
-    def recover_all(self) -> list[str]:
-        notes = []
-        for pid, svc in self.projects.items():
-            if svc.initialized:
-                notes += [f"{pid}: {n}" for n in svc.recover()]
-        return notes
 
 
 def create_app(manager: Manager) -> FastAPI:
@@ -61,7 +40,7 @@ def create_app(manager: Manager) -> FastAPI:
         if identity is None:
             return None, _error(P.UNAUTHORIZED, "token ausente ou inválido")
         svc = manager.projects.get(project_id)
-        if svc is None or not can_read(identity, svc.project):
+        if svc is None or not can_read(identity, svc.bindings):
             return None, _error(P.NOT_FOUND, "projeto não encontrado")
         if not svc.initialized:
             return None, _error(P.NOT_FOUND, "projeto não inicializado")
@@ -83,7 +62,7 @@ def create_app(manager: Manager) -> FastAPI:
         svc, err = project_for(identity, project_id)
         if err:
             return err
-        binding = svc.project.bindings.get(binding_id)
+        binding = svc.bindings.get(binding_id)
         if binding is None or not owns_binding(identity, binding):
             return _error(P.FORBIDDEN, "vínculo não pertence a este dispositivo")
         return _outcome(svc.publish(identity, binding, body))

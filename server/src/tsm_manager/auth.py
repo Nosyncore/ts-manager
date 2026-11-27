@@ -11,7 +11,8 @@ import hashlib
 import hmac
 import secrets
 
-from tsm_manager.config import BindingConfig, Identity, ManagerConfig, ProjectConfig
+from tsm_manager.bindings import BindingSource
+from tsm_manager.config import BindingConfig, Identity, ManagerConfig
 
 
 def token_sha256(token: str) -> str:
@@ -33,10 +34,10 @@ def authenticate(cfg: ManagerConfig, authorization: str | None) -> Identity | No
     return found
 
 
-def can_read(identity: Identity, project: ProjectConfig) -> bool:
+def can_read(identity: Identity, bindings: BindingSource) -> bool:
     if identity.is_admin:
         return True
-    return any(b.device == identity.device for b in project.bindings.values())
+    return identity.device is not None and bindings.for_device(identity.device) is not None
 
 
 def owns_binding(identity: Identity, binding: BindingConfig) -> bool:

@@ -10,9 +10,11 @@ from fastapi.testclient import TestClient
 
 from tests.manager.conftest import DEMO, demo_files, sha
 from tsm_common.rules import ProjectRules, rules_digest
-from tsm_manager.api import Manager, create_app
+from tsm_manager.api import create_app
 from tsm_manager.auth import token_sha256
 from tsm_manager.config import load_manager_config
+from tsm_manager.db import Database, upgrade
+from tsm_manager.services import Manager
 
 pytestmark = pytest.mark.integration
 
@@ -37,9 +39,13 @@ def env(tmp_path):
              "token_sha256": token_sha256("tok-x")},
         ],
     }), encoding="utf-8")
-    manager = Manager(load_manager_config(cfg_path))
+    cfg = load_manager_config(cfg_path)
+    db = Database(cfg.database)
+    upgrade(db)
+    manager = Manager(cfg, db=db)
     assert manager.projects["demo"].init_project(DEMO).status == "published"
-    return manager, TestClient(create_app(manager))
+    yield manager, TestClient(create_app(manager))
+    manager.close()
 
 
 def H(token):

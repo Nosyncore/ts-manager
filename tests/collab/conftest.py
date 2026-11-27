@@ -3,6 +3,7 @@
 Layout em ``tmp_path``::
 
     srv/projects/demo/{workspaces/pca,pcb, shared, history}   (Manager)
+    srv/manager/manager.db                                    (banco do Manager)
     manager.json                                              (config do Manager)
     pcA/{work,cache,state,mutagen-data,token}  pcA.json       (idem pcB)
     admin.json + admin-token                                  (identidade admin)
@@ -231,10 +232,11 @@ def make_collab(tmp_path: Path, exe: Path, *, test_faults: bool = True) -> Colla
     }
     cfg_path = tmp_path / "manager.json"
     cfg_path.write_text(json.dumps(mcfg, indent=1), encoding="utf-8")
-    r = subprocess.run([sys.executable, "-m", "tsm_manager", "init-project", "--config",
-                        str(cfg_path), "--project", "demo", "--from", str(DEMO)],
-                       capture_output=True, text=True, encoding="utf-8")
-    assert r.returncode == 0, r.stdout + r.stderr
+    for cmd in (["migrate"], ["init-project", "--project", "demo", "--from", str(DEMO)]):
+        r = subprocess.run([sys.executable, "-m", "tsm_manager", cmd[0], "--config",
+                            str(cfg_path), *cmd[1:]],
+                           capture_output=True, text=True, encoding="utf-8")
+        assert r.returncode == 0, r.stdout + r.stderr
     project_dir = tmp_path / "srv" / "projects" / "demo"
     manager = ManagerProc(cfg_path, free_port())
 

@@ -1,7 +1,8 @@
 """Manager com Git real, sem Mutagen.
 
 Os workspaces são escritos diretamente pelo teste, como o Mutagen faria. O "dev" é um
-pequeno modelo do Client: mantém a base (commit + manifesto) e monta as requisições.
+pequeno modelo do Client: mantém a base (commit + manifesto) e monta as requisições. O
+banco do Manager fica em ``<root>/manager/manager.db``, migrado antes do uso.
 """
 
 from __future__ import annotations
@@ -18,9 +19,10 @@ import pytest
 from tests.conftest import REPO_ROOT
 from tsm_common.protocol import REVISION_FILE, RevisionInfo
 from tsm_common.rules import ProjectRules, rules_digest
-from tsm_manager.config import BindingConfig, Identity, Limits, ProjectConfig
+from tsm_manager.config import DEFAULT_DATABASE, BindingConfig, Identity, Limits, ProjectConfig
+from tsm_manager.db import Database, upgrade
 from tsm_manager.faults import Faults
-from tsm_manager.project import Outcome, ProjectService
+from tsm_manager.project import Outcome, ProjectService, open_project
 
 DEMO = REPO_ROOT / "examples" / "demo-project"
 
@@ -100,6 +102,23 @@ def demo_files() -> dict[str, bytes]:
     return out
 
 
+def migrated_db(root: Path) -> Database:
+    """Banco do Manager sob ``root``, com todas as migrations aplicadas."""
+    db = Database(root / DEFAULT_DATABASE)
+    upgrade(db)
+    return db
+
+
+def open_service(root: Path, project: ProjectConfig, **kw: Any) -> ProjectService:
+    """Serviço sobre ``root``, com conexão própria ao banco (como um Manager novo)."""
+    return open_project(root, project, Database(root / DEFAULT_DATABASE), **kw)
+
+
+def reopen(svc: ProjectService, **kw: Any) -> ProjectService:
+    """O mesmo projeto num serviço novo: simula o reinício do Manager."""
+    return open_service(svc.layout.root, svc.project, **kw)
+
+
 def make_project(tmp_path: Path, *, rules: ProjectRules | None = None,
                  limits: Limits | None = None, faults: Faults | None = None) -> ProjectService:
     project = ProjectConfig(
@@ -107,7 +126,8 @@ def make_project(tmp_path: Path, *, rules: ProjectRules | None = None,
         {"demo-pca": BindingConfig("demo-pca", "pca", "pca"),
          "demo-pcb": BindingConfig("demo-pcb", "pcb", "pcb")},
     )
-    svc = ProjectService(tmp_path / "srv", project, faults=faults, lock_timeout=60)
+    root = tmp_path / "srv"
+    svc = open_project(root, project, migrated_db(root), faults=faults, lock_timeout=60)
     out = svc.init_project(DEMO)
     assert out.status == "published", out.payload
     return svc
@@ -120,7 +140,7 @@ def svc(tmp_path: Path) -> ProjectService:
 
 def dev(svc: ProjectService, which: str) -> Dev:
     ident = {"a": DEV_A, "b": DEV_B}[which]
-    binding = svc.project.bindings[f"demo-pc{which}"]
+    binding = svc.bindings.get(f"demo-pc{which}")
     d = Dev(svc, ident, binding, svc.git.resolve("refs/heads/main"), demo_files())
     d.sync_workspace()
     return d

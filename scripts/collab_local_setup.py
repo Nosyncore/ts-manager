@@ -3,14 +3,16 @@
 Layout (em ``--root``, padrão ``.collab``)::
 
     manager.json                    config do Manager (identidades de teste)
+    srv/manager/manager.db          banco do Manager (criado por tsm-manager migrate)
     srv/projects/demo/...           workspaces, shared e history (Git interno)
     pcA.json  pcA/{token, ...}      Client do dev A (config version 2)
     pcB.json  pcB/{token, ...}      Client do dev B
     admin.json  admin-token         identidade admin (rollback, auditoria)
 
-O projeto é inicializado com ``tsm-manager init-project`` a partir de
-``examples/demo-project`` (revisão r1). As pastas de trabalho não existem: cada PC as
-cria com ``tsm init``. Os tokens são gerados aqui e só valem para esta demo local.
+O banco é criado com ``tsm-manager migrate`` e o projeto, inicializado com
+``tsm-manager init-project`` a partir de ``examples/demo-project`` (revisão r1). As
+pastas de trabalho não existem: cada PC as cria com ``tsm init``. Os tokens são gerados
+aqui e só valem para esta demo local.
 
 ``--reset`` apaga um ambiente criado antes por este script (identificado por marcador).
 """
@@ -55,6 +57,8 @@ def create(root: Path, port: int) -> None:
         ],
     }
     (root / "manager.json").write_text(json.dumps(manager, indent=2), encoding="utf-8")
+    subprocess.run([sys.executable, "-m", "tsm_manager", "migrate", "--config",
+                    str(root / "manager.json")], check=True)
     subprocess.run([sys.executable, "-m", "tsm_manager", "init-project", "--config",
                     str(root / "manager.json"), "--project", "demo", "--from", str(DEMO)],
                    check=True)

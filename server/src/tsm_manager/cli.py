@@ -1,6 +1,10 @@
-"""CLI ``tsm-manager`` (no servidor): init-project, serve, recover, verify, token.
+"""CLI ``tsm-manager`` (no servidor): migrate, init-project, serve, recover, verify, token.
 
-Códigos de saída: 0 sucesso; 1 falha; 2 config/uso inválido; 3 verificação com problemas.
+``serve``, ``init-project``, ``recover`` e ``verify`` recusam banco ausente ou
+desatualizado: o banco é criado e atualizado só pelo ``migrate``.
+
+Códigos de saída: 0 sucesso; 1 falha; 2 config/uso inválido; 3 verificação com problemas
+(no ``migrate --status``: banco ausente ou migrations pendentes).
 """
 
 from __future__ import annotations
@@ -14,7 +18,9 @@ from typing import TextIO
 
 from tsm_manager import __version__
 from tsm_manager.auth import new_token, token_sha256
-from tsm_manager.config import ManagerConfigError, load_manager_config
+from tsm_manager.config import ManagerConfig, ManagerConfigError, load_manager_config
+from tsm_manager.db import Database, MigrationError, require_current, schema_status, server_id
+from tsm_manager.db import upgrade as db_upgrade
 from tsm_manager.project import ProjectError
 
 EXIT_OK, EXIT_FAIL, EXIT_CONFIG, EXIT_PROBLEMS = 0, 1, 2, 3
@@ -33,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tsm-manager", description="TS Manager — servidor")
     p.add_argument("--version", action="version", version=f"tsm-manager {__version__}")
     sub = p.add_subparsers(dest="command", required=True, metavar="comando")
+    mg = sub.add_parser("migrate", help="cria ou atualiza o banco do Manager")
+    mg.add_argument("--config", "-c", required=True)
+    mg.add_argument("--status", action="store_true", help="só mostra a versão do esquema")
     ip = sub.add_parser("init-project", help="cria o Git interno, r1 e o shared")
     ip.add_argument("--config", "-c", required=True)
     ip.add_argument("--project", required=True)
@@ -63,10 +72,19 @@ def run(argv: Sequence[str], out: TextIO | None = None, err: TextIO | None = Non
     except ManagerConfigError as exc:
         err.write(f"tsm-manager: config inválida: {exc}\n")
         return EXIT_CONFIG
+    if args.command == "migrate":
+        return _migrate(cfg, args.status, out, err)
 
-    from tsm_manager.api import Manager  # importa FastAPI só quando necessário
+    from tsm_manager.services import Manager
 
-    manager = Manager(cfg)
+    db = Database(cfg.database)
+    try:
+        require_current(db)
+    except MigrationError as exc:
+        db.close()
+        err.write(f"tsm-manager: {exc}\n")
+        return EXIT_FAIL
+    manager = Manager(cfg, db=db)
     try:
         match args.command:
             case "init-project":
@@ -111,7 +129,34 @@ def run(argv: Sequence[str], out: TextIO | None = None, err: TextIO | None = Non
     except ProjectError as exc:
         err.write(f"tsm-manager: {exc}\n")
         return EXIT_FAIL
+    finally:
+        manager.close()
     return EXIT_OK
+
+
+def _migrate(cfg: ManagerConfig, status_only: bool, out: TextIO, err: TextIO) -> int:
+    if status_only and not cfg.database.is_file():
+        out.write(f"banco: ausente ({cfg.database})\n")
+        return EXIT_PROBLEMS
+    db = Database(cfg.database)
+    try:
+        if status_only:
+            st = schema_status(db)
+            out.write(f"banco: {cfg.database}\nesquema: versão {st.current} de {st.latest}\n")
+            for mg in st.pending:
+                out.write(f"  pendente: {mg.version:04d}_{mg.name}\n")
+            return EXIT_OK if st.up_to_date else EXIT_PROBLEMS
+        applied = db_upgrade(db, backup_dir=cfg.backups)
+        st = schema_status(db)
+        for v in applied:
+            out.write(f"aplicada: {v:04d}\n")
+        out.write(f"esquema: versão {st.current} de {st.latest}; server_id {server_id(db)}\n")
+        return EXIT_OK
+    except MigrationError as exc:
+        err.write(f"tsm-manager: {exc}\n")
+        return EXIT_FAIL
+    finally:
+        db.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:

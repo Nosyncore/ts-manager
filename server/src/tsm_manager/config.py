@@ -5,6 +5,7 @@ Formato (JSON)::
     {
       "version": 1,
       "root": "/srv/ts",
+      "database": "manager/manager.db",       # opcional; relativo a root, sempre sob root
       "shared_group": "tsm-readers",          # opcional (POSIX): grupo de leitura do shared
       "test_faults": false,                   # opcional: aceita falhas injetadas (só testes)
       "projects": [{
@@ -19,8 +20,10 @@ Formato (JSON)::
       ]
     }
 
-``root`` relativo é resolvido a partir do diretório do arquivo de config. As identidades
-são de teste e serão substituídas pela identidade real.
+``root`` relativo é resolvido a partir do diretório do arquivo de config; ``database``
+relativo, a partir de ``root``. Um banco que resolva para fora de ``root`` é recusado: todo
+o estado do servidor fica sob ``root``. As identidades são de teste e serão substituídas
+pela identidade real.
 """
 
 from __future__ import annotations
@@ -37,6 +40,7 @@ from tsm_common.pathpolicy import DEFAULT_MAX_PATH_CHARS
 from tsm_common.rules import ProjectRules, RulesError
 
 CONFIG_VERSION = 1
+DEFAULT_DATABASE = "manager/manager.db"
 ROLES = ("developer", "admin")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
 _DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")
@@ -96,9 +100,15 @@ class ManagerConfig:
     root: Path
     projects: Mapping[str, ProjectConfig]
     identities: tuple[Identity, ...]
+    database: Path
     shared_group: str | None = None
     test_faults: bool = False
     extra: Mapping[str, Any] = field(default_factory=dict)
+
+    @property
+    def backups(self) -> Path:
+        """Cópias do banco feitas antes de cada migration."""
+        return self.database.parent / "backups"
 
 
 def _obj(value: Any, where: str, allowed: set[str], required: set[str]) -> Mapping[str, Any]:
@@ -146,13 +156,15 @@ def load_manager_config(path: str | os.PathLike[str]) -> ManagerConfig:
         raise ManagerConfigError(f"{cfg_path}: JSON inválido: {exc}") from exc
 
     top = _obj(data, "config",
-               {"version", "root", "shared_group", "test_faults", "projects", "identities"},
+               {"version", "root", "database", "shared_group", "test_faults", "projects",
+                "identities"},
                {"version", "root", "projects", "identities"})
     if top["version"] != CONFIG_VERSION:
         raise ManagerConfigError(f"config.version: suportado apenas {CONFIG_VERSION}")
     root = Path(_text(top, "root", "config"))
     if not root.is_absolute():
         root = (cfg_path.parent / root).resolve()
+    database = _database(top, root)
 
     projects: dict[str, ProjectConfig] = {}
     if not isinstance(top["projects"], list) or not top["projects"]:
@@ -217,4 +229,16 @@ def load_manager_config(path: str | os.PathLike[str]) -> ManagerConfig:
     faults = top.get("test_faults", False)
     if not isinstance(faults, bool):
         raise ManagerConfigError("config.test_faults: esperado booleano")
-    return ManagerConfig(cfg_path, root, projects, tuple(identities), group, faults)
+    return ManagerConfig(cfg_path, root, projects, tuple(identities), database, group, faults)
+
+
+def _database(top: Mapping[str, Any], root: Path) -> Path:
+    raw = top.get("database", DEFAULT_DATABASE)
+    if not isinstance(raw, str) or not raw:
+        raise ManagerConfigError("config.database: esperado texto não vazio")
+    root_real = root.resolve()
+    path = Path(raw)
+    resolved = (path if path.is_absolute() else root_real / path).resolve()
+    if resolved == root_real or not resolved.is_relative_to(root_real):
+        raise ManagerConfigError(f"config.database: {raw!r} fica fora de root ({root})")
+    return resolved

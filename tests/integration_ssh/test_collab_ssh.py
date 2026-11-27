@@ -178,6 +178,9 @@ def ssh_collab(tmp_path, mgr_container, mutagen_exe, ssh_dir) -> Iterator[SshCol
     c.setup("reset")
     c.sh("cat > /etc/tsm/manager.json && chgrp tsm-manager /etc/tsm/manager.json && "
          "chmod 0640 /etc/tsm/manager.json", input=json.dumps(manager_config()))
+    c.sh("rm -rf /srv/ts/manager && install -d -o tsm-manager -g tsm-manager -m 0700 "
+         "/srv/ts/manager")
+    c.manager("migrate", "--config", "/etc/tsm/manager.json")
     c.manager("init-project", "--config", "/etc/tsm/manager.json", "--project", "demo",
               "--from", "/opt/demo")
     docker("exec", "-d", "-u", "tsm-manager", c.name, f"{VENV}/tsm-manager", "serve",
