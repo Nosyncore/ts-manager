@@ -1,32 +1,53 @@
 """CLI ``tsm`` (argparse, sem dependências de terceiros em runtime).
 
+Origem da configuração (exclusivas):
+
+- ``--home DIR`` / ``TSM_HOME`` / padrão (``%LOCALAPPDATA%\\tsm``): config ``version: 3``,
+  identidade real (sessão por challenge-response);
+- ``--config ARQUIVO``: configs ``version: 1`` (transporte) e ``version: 2`` (colaboração com
+  a identidade de teste), mantidas só até a migração das suítes antigas.
+
+Identidade (só com o ``<home>``): enroll, whoami, bind, logout, admin.
 Transporte: doctor, up, status, flush, pause, resume, teardown.
-Colaboração (config ``version: 2``): init, changes, diff, publish, pull, history,
-show, rollback, audit.
+Colaboração: init, changes, diff, publish, pull, history, show, rollback, audit.
 
 Códigos de saída:
   0  sucesso
-  1  falha do Mutagen/daemon ou do git
-  2  configuração ou vínculo inválido (inclui erros de uso)
-  3  recusado por segurança (salvaguarda, config alterada, pendência, recusa do Manager)
+  1  falha do Mutagen/daemon, do git, do ssh-keygen ou do icacls; provisionamento falhou
+  2  configuração ou uso inválido (inclui URL do Manager insegura e pedido inválido)
+  3  recusado (salvaguarda, config alterada, pendência, recusa do Manager, outro servidor)
   4  bloqueado por conflito (nada mudou)
-  5  Manager inacessível ou cache ainda não verificado (repita depois)
+  5  Manager inacessível, limitado (429) ou cache ainda não verificado (repita depois)
+  6  identidade pendente, rejeitada, revogada, expirada ou bloqueada
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import json
+import os
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, TextIO
 
 from tsm_client import __version__
+from tsm_client.adapters.acl import AclError
 from tsm_client.adapters.git import ClientGit, GitUnavailable, find_git
-from tsm_client.adapters.manager import ManagerClient, ManagerProtocolError, ManagerUnavailable
+from tsm_client.adapters.manager import (
+    ManagerClient,
+    ManagerProtocolError,
+    ManagerUnavailable,
+    ManagerUrlError,
+)
 from tsm_client.adapters.mutagen import MutagenAdapter, MutagenError, SubprocessRunner, mutagen_env
+from tsm_client.adapters.sshkeygen import KeygenError
+from tsm_client.admin import AdminService, parse_duration, ssh_pending
 from tsm_client.collab import CollabService, PublishReport, PullReport, read_token
-from tsm_client.config import Config, ConfigError, load_config
+from tsm_client.config import Config, ConfigError, load_config, load_home_config, read_home_config
+from tsm_client.enroll import Identity, Toolkit
+from tsm_client.home import Home, HomeError, resolve_home
+from tsm_client.login import IdentityPending, IdentityRefused, ManagerRefused
 from tsm_client.paths import PathError
 from tsm_client.pulling import CONFLICT, CacheNotReady, PlanError
 from tsm_client.rules import RulesError
@@ -35,13 +56,15 @@ from tsm_client.sessions import Role, SessionRuleError
 from tsm_client.state import StateError, StateStore
 from tsm_common import protocol as P
 
-EXIT_OK, EXIT_MUTAGEN, EXIT_CONFIG, EXIT_REFUSED, EXIT_CONFLICT, EXIT_UNAVAILABLE = range(6)
+(EXIT_OK, EXIT_MUTAGEN, EXIT_CONFIG, EXIT_REFUSED, EXIT_CONFLICT, EXIT_UNAVAILABLE,
+ EXIT_IDENTITY) = range(7)
 
 ServiceFactory = Callable[[Config], TransportService]
 CollabFactory = Callable[[Config, TransportService], CollabService]
 
 COLLAB_COMMANDS = {"init", "changes", "diff", "publish", "pull", "history", "show", "rollback",
                    "audit"}
+IDENTITY_COMMANDS = {"enroll", "whoami", "bind", "logout", "admin"}
 
 
 def default_service(cfg: Config) -> TransportService:
@@ -59,22 +82,86 @@ def default_service(cfg: Config) -> TransportService:
     return TransportService(cfg, adapter, initialized)
 
 
-def default_collab(cfg: Config, transport: TransportService) -> CollabService:
+def manager_client(cfg: Config, toolkit: Toolkit | None = None) -> ManagerClient:
+    """Cliente do Manager da config: sessão real (``version: 3``) ou token fixo (``2``)."""
+    assert cfg.manager is not None
+    if cfg.version == 3:
+        assert cfg.home is not None
+        identity = Identity(cfg.home, toolkit)
+        return identity.session(read_home_config(cfg.home))[0]
+    return ManagerClient(cfg.manager.url, read_token(cfg))
+
+
+def default_collab(cfg: Config, transport: TransportService, *,
+                   toolkit: Toolkit | None = None) -> CollabService:
     if not cfg.collab_enabled:
-        raise ConfigError("colaboração exige config version 2 (state_directory e manager)")
-    assert cfg.state_directory is not None and cfg.manager is not None
+        raise ConfigError("colaboração exige config version 2 ou o diretório do tsm")
+    assert cfg.state_directory is not None
     store = StateStore(cfg.state_directory)
     git = ClientGit(find_git(cfg.git), store.git_global_config)
-    manager = ManagerClient(cfg.manager.url, read_token(cfg))
-    return CollabService(cfg, transport, manager, git, store)
+    return CollabService(cfg, transport, manager_client(cfg, toolkit), git, store)
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tsm", description="TS Manager — Client de terminal")
     p.add_argument("--version", action="version", version=f"tsm {__version__}")
-    p.add_argument("--config", "-c", required=True, help="arquivo de configuração do dispositivo")
+    src = p.add_mutually_exclusive_group()
+    src.add_argument("--home", default=None,
+                     help="diretório do tsm (padrão: TSM_HOME ou %%LOCALAPPDATA%%\\tsm)")
+    src.add_argument("--config", "-c", default=None,
+                     help="arquivo de configuração version 1/2 (suítes antigas)")
     sub = p.add_subparsers(dest="command", required=True, metavar="comando")
 
+    # ------------------------------------------------------------ identidade
+    en = sub.add_parser("enroll", help="cadastra este dispositivo com um convite")
+    en.add_argument("--manager", required=True, help="URL do Manager")
+    en.add_argument("--invite", required=True, help="código do convite (tsm-inv-…)")
+    en.add_argument("--name", default=None, help="seu nome de exibição (convite de usuário)")
+    en.add_argument("--device-name", default=None, help="nome deste dispositivo")
+    en.add_argument("--ca-file", default=None, help="CA do Manager (https)")
+    en.add_argument("--wait", type=float, default=None, metavar="S",
+                    help="espera a aprovação por até S segundos")
+    en.add_argument("--json", action="store_true")
+    wh = sub.add_parser("whoami", help="usuário, dispositivo, status e vínculos")
+    wh.add_argument("--json", action="store_true")
+    bd = sub.add_parser("bind", help="vincula uma pasta a um projeto e inicializa")
+    bd.add_argument("--project", required=True)
+    bd.add_argument("--local", default=None, help="pasta de trabalho (vazia ou ausente)")
+    bd.add_argument("--cache", default=None, help="cache do shared (padrão: no diretório do tsm)")
+    bd.add_argument("--wait", type=float, default=60.0, help="segundos esperando o cache")
+    bd.add_argument("--json", action="store_true")
+    sub.add_parser("logout", help="encerra a sessão atual")
+
+    ad = sub.add_parser("admin", help="administração (admin)")
+    adsub = ad.add_subparsers(dest="area", required=True, metavar="área")
+    inv = adsub.add_parser("invite", help="convites").add_subparsers(dest="action",
+                                                                      required=True)
+    ic = inv.add_parser("create")
+    ic.add_argument("--project", required=True)
+    ic.add_argument("--role", choices=["developer", "admin"], default="developer")
+    ic.add_argument("--for-user", default=None, help="novo dispositivo de usuário existente")
+    ic.add_argument("--ttl", default=None, help="validade (30m, 24h, 7d)")
+    ic.add_argument("--json", action="store_true")
+    inv.add_parser("list").add_argument("--json", action="store_true")
+    inv.add_parser("revoke").add_argument("id")
+    req = adsub.add_parser("requests", help="solicitações").add_subparsers(dest="action",
+                                                                            required=True)
+    req.add_parser("list").add_argument("--json", action="store_true")
+    ap = req.add_parser("approve")
+    ap.add_argument("id")
+    ap.add_argument("--fingerprint", required=True)
+    req.add_parser("reject").add_argument("id")
+    dev = adsub.add_parser("devices", help="dispositivos").add_subparsers(dest="action",
+                                                                           required=True)
+    dev.add_parser("list").add_argument("--json", action="store_true")
+    dev.add_parser("revoke").add_argument("id")
+    usr = adsub.add_parser("users", help="usuários").add_subparsers(dest="action",
+                                                                     required=True)
+    usr.add_parser("list").add_argument("--json", action="store_true")
+    usr.add_parser("block").add_argument("id")
+    usr.add_parser("unblock").add_argument("id")
+
+    # ------------------------------------------------------------ transporte
     sub.add_parser("doctor", help="verifica Mutagen, ssh e daemon")
     sub.add_parser("up", help="cria ou retoma as sessões (idempotente)")
     st = sub.add_parser("status", help="estado das sessões e do vínculo")
@@ -88,6 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     td = sub.add_parser("teardown", help="termina somente as sessões gerenciadas desta config")
     td.add_argument("--stop-daemon", action="store_true", help="para o daemon isolado no final")
 
+    # ------------------------------------------------------------ colaboração
     def with_binding(sp: argparse.ArgumentParser) -> argparse.ArgumentParser:
         sp.add_argument("--binding", default=None, help="vínculo (se a config tiver vários)")
         return sp
@@ -133,6 +221,13 @@ def _revision_number(raw: str) -> int:
     if not text.isdigit():
         raise ConfigError(f"revisão inválida: {raw!r} (use rN)")
     return int(text)
+
+
+def _dump(out: TextIO, data: Any) -> None:
+    out.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+# ================================================================ transporte e colaboração
 
 
 def _print_status(service: TransportService, out: TextIO, as_json: bool,
@@ -246,6 +341,9 @@ def _print_publish(out: TextIO, err: TextIO, rep: PublishReport, as_json: bool) 
                 err.write(f"tsm: publicação recusada ({rep.status}): {body.get('message', '')}\n")
                 for e in body.get("errors", []) + body.get("paths", []):
                     err.write(f"  {e.get('path', '')}: {e.get('reason', '')}\n")
+                if rep.status == P.RULES_MISMATCH:
+                    err.write("tsm: as regras do projeto mudaram; com o diretório do tsm, "
+                              "atualize com 'tsm bind --project <projeto>'\n")
             return EXIT_REFUSED
 
 
@@ -366,54 +464,256 @@ def _run_collab(args: argparse.Namespace, collab: CollabService, out: TextIO,
     return EXIT_OK
 
 
+def _run_transport(args: argparse.Namespace, cfg: Config, service: TransportService,
+                   collab_factory: CollabFactory, out: TextIO, err: TextIO) -> int:
+    match args.command:
+        case "doctor":
+            report = service.doctor()
+            for label, value, ok in report.lines:
+                out.write(f"{'ok ' if ok else 'ERRO'} {label}: {value}\n")
+            return EXIT_OK if report.ok else EXIT_MUTAGEN
+        case "up":
+            for r in service.up():
+                out.write(f"{r.spec.name}: {r.action} ({r.identifier})\n")
+            if cfg.state_directory is not None:
+                store = StateStore(cfg.state_directory)
+                for b in cfg.bindings:
+                    if not store.initialized(b.id):
+                        out.write(f"vínculo {b.id}: sem upload até 'tsm init'\n")
+        case "status":
+            info = None
+            if cfg.collab_enabled and len(cfg.bindings) == 1:
+                try:
+                    info = collab_factory(cfg, service).status_info()
+                except (ConfigError, GitUnavailable) as exc:
+                    err.write(f"tsm: estado do vínculo indisponível: {exc}\n")
+            _print_status(service, out, args.json, info)
+        case "flush":
+            role = Role(args.role) if args.role else None
+            for s in service.flush(role):
+                out.write(f"{s.name}: flush concluído\n")
+        case "pause":
+            for s in service.pause():
+                out.write(f"{s.name}: pausada\n")
+        case "resume":
+            for s in service.resume(confirm_halted=args.confirm_halted):
+                out.write(f"{s.name}: retomada\n")
+        case "teardown":
+            for s in service.teardown(stop_daemon=args.stop_daemon):
+                out.write(f"{s.name}: terminada\n")
+    return EXIT_OK
+
+
+# ================================================================ identidade
+
+
+def _print_enroll(out: TextIO, res: Any, as_json: bool) -> None:
+    if as_json:
+        _dump(out, res.to_dict())
+        return
+    if res.recovered:
+        out.write("chave já cadastrada neste Manager: cadastro recuperado\n")
+    state = "aprovado" if res.status == "active" else res.status
+    out.write(f"dispositivo {res.device_id} ({state})\n")
+    out.write(f"fingerprint: {res.fingerprint}\n")
+    out.write(f"servidor: {res.server_id}\n")
+    if res.status != "active":
+        out.write("peça a aprovação conferindo o fingerprint acima:\n"
+                  f"  tsm admin requests approve {res.device_id} --fingerprint "
+                  f"{res.fingerprint}\n"
+                  "  (primeiro admin, no servidor: tsm-manager requests approve "
+                  f"{res.device_id} --fingerprint {res.fingerprint})\n")
+
+
+def _print_whoami(out: TextIO, info: dict[str, Any], as_json: bool) -> None:
+    if as_json:
+        _dump(out, info)
+        return
+    user, device = info.get("user") or {}, info.get("device") or {}
+    session = info.get("session") or {}
+    out.write(f"usuário: {user.get('display_name')} ({user.get('role')}, "
+              f"{user.get('status')}) {user.get('id')}\n")
+    out.write(f"dispositivo: {device.get('name')} ({device.get('status')}) "
+              f"{device.get('id')}\n")
+    out.write(f"fingerprint: {info.get('fingerprint')}\n")
+    out.write(f"Manager: {info.get('manager')} (servidor {info.get('server_id')})\n")
+    out.write(f"sessão: {session.get('scope')} até {session.get('expires_at')}\n")
+    if device.get("status") in ("pending", "provisioning"):
+        out.write("aguardando aprovação do admin\n")
+    local = {b["id"]: b for b in info.get("local_bindings", [])}
+    for b in info.get("bindings", []):
+        where = local.get(b["id"], {}).get("local", "(sem pasta local: rode 'tsm bind')")
+        out.write(f"vínculo {b['id']} ({b['project_id']}): {where}\n")
+
+
+def _print_list(out: TextIO, rows: list[dict[str, Any]], as_json: bool,
+                fmt: Callable[[dict[str, Any]], str], empty: str) -> None:
+    if as_json:
+        _dump(out, rows)
+        return
+    if not rows:
+        out.write(empty + "\n")
+    for row in rows:
+        out.write(fmt(row) + "\n")
+
+
+def _warn_ssh_pending(err: TextIO, result: dict[str, Any]) -> None:
+    for item in ssh_pending(result):
+        err.write(f"tsm: aviso: a parte SSH de {item.get('device_id')} ficou pendente "
+                  f"({item.get('error') or 'helper falhou'}); o recover do Manager conclui. "
+                  "A API já recusa o acesso\n")
+
+
+def _run_admin(args: argparse.Namespace, admin: AdminService, out: TextIO,
+               err: TextIO) -> int:
+    as_json = getattr(args, "json", False)
+    match (args.area, args.action):
+        case ("invite", "create"):
+            ttl = parse_duration(args.ttl) if args.ttl else None
+            inv = admin.invite_create(args.project, role=args.role, for_user=args.for_user,
+                                      ttl_s=ttl)
+            if as_json:
+                _dump(out, inv)
+            else:
+                out.write(f"convite {inv['id']} ({inv['kind']}, {inv['role']}, projeto "
+                          f"{inv['project_id']}) válido até {inv['expires_at']}\n")
+                out.write(f"código (mostrado uma vez): {inv['code']}\n")
+        case ("invite", "list"):
+            _print_list(out, admin.invite_list(), as_json,
+                        lambda i: f"{i['id']} {i['state']:<8} {i['kind']:<10} {i['role']:<9} "
+                                  f"{i['project_id']} até {i['expires_at']}",
+                        "nenhum convite")
+        case ("invite", "revoke"):
+            inv = admin.invite_revoke(args.id)
+            out.write(f"convite {inv['id']}: {inv['state']}\n")
+        case ("requests", "list"):
+            _print_list(out, admin.requests_list(), as_json,
+                        lambda r: f"{r['device']['id']} {r['device']['status']:<12} "
+                                  f"{r['device']['fingerprint']} {r['user']['display_name']} / "
+                                  f"{r['device']['name']} (convite {r['invite']['kind']}, "
+                                  f"{r['invite']['project_id']}) {r['device']['created_at']}",
+                        "nenhuma solicitação pendente")
+        case ("requests", "approve"):
+            res = admin.approve(args.id, args.fingerprint)
+            out.write(f"aprovado: dispositivo {args.id}, vínculo {res['binding']['id']} "
+                      f"({res['binding']['project_id']})\n")
+        case ("requests", "reject"):
+            admin.reject(args.id)
+            out.write(f"rejeitado: dispositivo {args.id}\n")
+        case ("devices", "list"):
+            def fmt(d: dict[str, Any]) -> str:
+                note = " [revogação SSH pendente]" if d.get("ssh_revocation_pending") else ""
+                return (f"{d['id']} {d['status']:<12} {d['fingerprint']} "
+                        f"{d['user']['display_name']} / {d['name']}{note}")
+            _print_list(out, admin.devices_list(), as_json, fmt, "nenhum dispositivo")
+        case ("devices", "revoke"):
+            res = admin.device_revoke(args.id)
+            out.write(f"revogado: dispositivo {args.id} (SSH: {res.get('ssh')})\n")
+            _warn_ssh_pending(err, res)
+        case ("users", "list"):
+            _print_list(out, admin.users_list(), as_json,
+                        lambda u: f"{u['id']} {u['status']:<8} {u['role']:<9} "
+                                  f"{u['display_name']}",
+                        "nenhum usuário")
+        case ("users", ("block" | "unblock") as action):
+            res = admin.user_block(args.id) if action == "block" else \
+                admin.user_unblock(args.id)
+            out.write(f"usuário {args.id}: {res['status']}\n")
+            _warn_ssh_pending(err, res)
+    return EXIT_OK
+
+
+def _run_identity(args: argparse.Namespace, home: Home, toolkit: Toolkit,
+                  service_factory: ServiceFactory, collab_factory: CollabFactory,
+                  out: TextIO, err: TextIO) -> int:
+    ident = Identity(home, toolkit)
+    match args.command:
+        case "enroll":
+            res = ident.enroll(manager_url=args.manager, invite=args.invite, name=args.name,
+                               device_name=args.device_name, ca_file=args.ca_file,
+                               wait=args.wait)
+            _print_enroll(out, res, args.json)
+        case "whoami":
+            _print_whoami(out, ident.whoami(), args.json)
+        case "bind":
+            res = ident.bind(args.project, args.local, args.cache)
+            if res.host_keys_changed:
+                err.write(f"tsm: aviso: a chave de host do servidor mudou para o vínculo "
+                          f"{res.binding.id} (recebida pela /connection/config)\n")
+            cfg = load_home_config(home)
+            service = service_factory(cfg)
+            initialized = StateStore(home.state).initialized(res.binding.id)
+            info: dict[str, Any] = {"binding": res.binding.id, "project_id": args.project,
+                                    "local": res.binding.local, "cache": res.binding.cache,
+                                    "transport": res.connection.transport,
+                                    "created": res.created, "initialized": initialized}
+            if not initialized:
+                init = collab_factory(cfg, service).init(res.binding.id, wait=args.wait)
+                info.update(initialized=True, revision=init["revision"], files=init["files"])
+            if args.json:
+                _dump(out, info)
+            else:
+                verb = "vinculado" if res.created else "conexão atualizada"
+                out.write(f"{verb}: {res.binding.id} ({args.project}) em {res.binding.local}\n")
+                if "revision" in info:
+                    out.write(f"inicializado em r{info['revision']} ({info['files']} "
+                              "arquivo(s))\n")
+        case "logout":
+            try:
+                had = ident.logout()
+            except ManagerUnavailable as exc:
+                err.write(f"tsm: {exc}\ntsm: token local apagado; a sessão segue válida no "
+                          "Manager até expirar\n")
+                return EXIT_UNAVAILABLE
+            out.write("sessão encerrada\n" if had else "nenhuma sessão ativa\n")
+        case "admin":
+            client = Identity(home, toolkit).session(read_home_config(home))[0]
+            return _run_admin(args, AdminService(client), out, err)
+    return EXIT_OK
+
+
+def _refused_code(exc: ManagerRefused) -> int:
+    if exc.status == P.INVALID_REQUEST:
+        return EXIT_CONFIG
+    if exc.status == P.PROVISIONING_FAILED or exc.http_status >= 500:
+        return EXIT_MUTAGEN
+    return EXIT_REFUSED
+
+
 def run(argv: Sequence[str], *, service_factory: ServiceFactory = default_service,
-        collab_factory: CollabFactory = default_collab,
+        collab_factory: CollabFactory | None = None, toolkit: Toolkit | None = None,
+        environ: Mapping[str, str] | None = None,
         out: TextIO | None = None, err: TextIO | None = None) -> int:
     out = out or sys.stdout
     err = err or sys.stderr
     parser = build_parser()
     args = parser.parse_args(list(argv))
+    toolkit = toolkit or Toolkit()
+    collab_factory = collab_factory or functools.partial(default_collab, toolkit=toolkit)
     try:
-        cfg = load_config(args.config)
+        if args.config is not None:
+            if args.command in IDENTITY_COMMANDS:
+                raise ConfigError(f"'{args.command}' usa o diretório do tsm (--home), "
+                                  "não --config")
+            cfg = load_config(args.config)
+        else:
+            home = resolve_home(args.home, os.environ if environ is None else environ)
+            if args.command in IDENTITY_COMMANDS:
+                return _run_identity(args, home, toolkit, service_factory, collab_factory,
+                                     out, err)
+            cfg = load_home_config(home)
         service = service_factory(cfg)
         if args.command in COLLAB_COMMANDS:
             return _run_collab(args, collab_factory(cfg, service), out, err)
-        match args.command:
-            case "doctor":
-                report = service.doctor()
-                for label, value, ok in report.lines:
-                    out.write(f"{'ok ' if ok else 'ERRO'} {label}: {value}\n")
-                return EXIT_OK if report.ok else EXIT_MUTAGEN
-            case "up":
-                for r in service.up():
-                    out.write(f"{r.spec.name}: {r.action} ({r.identifier})\n")
-                if cfg.state_directory is not None:
-                    store = StateStore(cfg.state_directory)
-                    for b in cfg.bindings:
-                        if not store.initialized(b.id):
-                            out.write(f"vínculo {b.id}: sem upload até 'tsm init'\n")
-            case "status":
-                info = None
-                if cfg.collab_enabled and len(cfg.bindings) == 1:
-                    try:
-                        info = collab_factory(cfg, service).status_info()
-                    except (ConfigError, GitUnavailable) as exc:
-                        err.write(f"tsm: estado do vínculo indisponível: {exc}\n")
-                _print_status(service, out, args.json, info)
-            case "flush":
-                role = Role(args.role) if args.role else None
-                for s in service.flush(role):
-                    out.write(f"{s.name}: flush concluído\n")
-            case "pause":
-                for s in service.pause():
-                    out.write(f"{s.name}: pausada\n")
-            case "resume":
-                for s in service.resume(confirm_halted=args.confirm_halted):
-                    out.write(f"{s.name}: retomada\n")
-            case "teardown":
-                for s in service.teardown(stop_daemon=args.stop_daemon):
-                    out.write(f"{s.name}: terminada\n")
-    except (ConfigError, SessionRuleError, PathError, RulesError, PlanError) as exc:
+        return _run_transport(args, cfg, service, collab_factory, out, err)
+    except (IdentityRefused, IdentityPending) as exc:
+        err.write(f"tsm: {exc}\n")
+        return EXIT_IDENTITY
+    except ManagerRefused as exc:
+        err.write(f"tsm: recusado: {exc}\n")
+        return _refused_code(exc)
+    except (ConfigError, SessionRuleError, PathError, RulesError, PlanError, HomeError,
+            ManagerUrlError) as exc:
         err.write(f"tsm: configuração ou uso inválido: {exc}\n")
         return EXIT_CONFIG
     except (RefusedError, StateError) as exc:
@@ -434,10 +734,12 @@ def run(argv: Sequence[str], *, service_factory: ServiceFactory = default_servic
     except GitUnavailable as exc:
         err.write(f"tsm: git: {exc}\n")
         return EXIT_MUTAGEN
+    except (KeygenError, AclError) as exc:
+        err.write(f"tsm: {exc}\n")
+        return EXIT_MUTAGEN
     except MutagenError as exc:
         err.write(f"tsm: erro do Mutagen ({type(exc).__name__}): {exc}\n")
         return EXIT_MUTAGEN
-    return EXIT_OK
 
 
 def main(argv: Sequence[str] | None = None) -> int:

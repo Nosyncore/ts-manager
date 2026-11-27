@@ -34,7 +34,7 @@ LABEL_ROLE = "tsm-role"
 LABEL_SPEC = "tsm-spec"
 MANAGED_SELECTOR = f"{LABEL_MANAGED}=true"
 
-# Permissões no beta POSIX remoto: o Manager (no grupo do dispositivo) precisa ler.
+# Permissões no beta POSIX remoto: o Manager precisa ler (pelo grupo do conteúdo).
 REMOTE_BETA_MODES = ("--default-file-mode-beta=0640", "--default-directory-mode-beta=0750")
 # O shared remoto é somente leitura para o dispositivo. Em filesystem que o Mutagen não
 # reconhece, ele testa o comportamento criando um arquivo na raiz, o que falha. Com
@@ -62,6 +62,9 @@ class Binding:
     workspace: Endpoint
     shared: Endpoint
     rules: ProjectRules
+    # Grupo do conteúdo do workspace no servidor (``--default-group-beta``); só nos
+    # vínculos vindos da /connection/config com workspace remoto.
+    workspace_group: str | None = None
 
     def __post_init__(self) -> None:
         if not _BINDING_ID_RE.match(self.id):
@@ -122,6 +125,10 @@ def build_specs(binding: Binding) -> tuple[SyncSpec, SyncSpec]:
     up_flags = tuple(sync_flags(binding.rules, role=Role.UPLOAD.value)) + (
         REMOTE_BETA_MODES if binding.workspace.is_remote else ()
     )
+    if binding.workspace.is_remote and binding.workspace_group:
+        # o agente aplica o grupo a tudo que cria; o portão do workspace isola os
+        # dispositivos entre si
+        up_flags += (f"--default-group-beta={binding.workspace_group}",)
     down_flags = tuple(sync_flags(binding.rules, role=Role.DOWNLOAD.value)) + (
         REMOTE_ALPHA_PROBE if binding.shared.is_remote else ()
     )

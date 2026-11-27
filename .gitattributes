@@ -4,3 +4,5 @@ tests/fixtures/sshd/* text eol=lf
 deploy/** text eol=lf
 tests/fixtures/manager/* text eol=lf
 server/helper/* text eol=lf
+# Goldens comparados byte a byte com a saída do Client (LF).
+tests/fixtures/client/* text eol=lf

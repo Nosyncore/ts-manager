@@ -80,6 +80,17 @@ def test_remote_posix_beta_gets_group_readable_modes(remote_binding):
     assert not any(f.startswith("--default-file-mode") for f in down.flags)
 
 
+def test_workspace_group_only_on_remote_upload(remote_binding, binding):
+    plain_up, plain_down = build_specs(remote_binding)
+    grouped = Binding(**{**remote_binding.__dict__, "workspace_group": "tsm-ws"})
+    up, down = build_specs(grouped)
+    assert up.flags == (*plain_up.flags, "--default-group-beta=tsm-ws")
+    assert down.flags == plain_down.flags
+    assert up.spec_hash != plain_up.spec_hash  # sessões antigas pedem teardown
+    local = Binding(**{**binding.__dict__, "workspace_group": "tsm-ws"})
+    assert not any("default-group" in f for f in build_specs(local)[0].flags)
+
+
 def test_remote_read_only_shared_is_not_probed(remote_binding, binding):
     up, down = build_specs(remote_binding)
     assert "--probe-mode-alpha=assume" in down.flags

@@ -65,11 +65,12 @@ def specs_of(env):
     return env["services"][-1].specs()
 
 
-def test_parser_requires_command_and_config():
-    with pytest.raises(SystemExit):
-        build_parser().parse_args(["up"])
+def test_parser_requires_command_and_one_source():
+    assert build_parser().parse_args(["up"]).config is None  # padrão: o <home>
     with pytest.raises(SystemExit):
         build_parser().parse_args(["--config", "x"])
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["--config", "x", "--home", "y", "up"])
 
 
 def test_up_creates_two_sessions(env):

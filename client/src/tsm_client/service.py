@@ -18,6 +18,7 @@ from pathlib import Path
 from tsm_client.adapters.mutagen import MutagenAdapter, SessionState, pins
 from tsm_client.adapters.mutagen.runner import tool_version
 from tsm_client.config import Config, ConfigError, verify_project_folder
+from tsm_client.errors import RefusedError
 from tsm_client.sessions import (
     LABEL_BINDING,
     LABEL_MANAGED,
@@ -30,9 +31,8 @@ from tsm_client.sessions import (
     validate_specs,
 )
 
-
-class RefusedError(Exception):
-    """Operação recusada por segurança (sessão parada por salvaguarda, config alterada)."""
+__all__ = ["DoctorReport", "RefusedError", "SessionView", "TransportService", "UpResult",
+           "resolve_executable"]
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,45 @@
+# Gerado pelo tsm a partir da /connection/config do Manager; não editar.
+
+Host tsm-b-0123456789abcdef0123
+  HostName ts.example.net
+  Port 22
+  User tsm-d-0123456789ab
+  HostKeyAlias tsm-b-0123456789abcdef0123
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  UserKnownHostsFile ~/.ssh/known_hosts
+  GlobalKnownHostsFile /dev/null
+  StrictHostKeyChecking yes
+  UpdateHostKeys no
+  CheckHostIP no
+  BatchMode yes
+  PreferredAuthentications publickey
+  PasswordAuthentication no
+  KbdInteractiveAuthentication no
+  ForwardAgent no
+  ForwardX11 no
+  ClearAllForwardings yes
+  RequestTTY no
+  ControlMaster no
+
+Host tsm-b-fedcba9876543210fedc
+  HostName 192.0.2.10
+  Port 2222
+  User tsm-d-ba9876543210
+  HostKeyAlias tsm-b-fedcba9876543210fedc
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  UserKnownHostsFile ~/.ssh/known_hosts
+  GlobalKnownHostsFile /dev/null
+  StrictHostKeyChecking yes
+  UpdateHostKeys no
+  CheckHostIP no
+  BatchMode yes
+  PreferredAuthentications publickey
+  PasswordAuthentication no
+  KbdInteractiveAuthentication no
+  ForwardAgent no
+  ForwardX11 no
+  ClearAllForwardings yes
+  RequestTTY no
+  ControlMaster no
