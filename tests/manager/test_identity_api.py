@@ -18,84 +18,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.collab.conftest import free_port
-from tests.integration.conftest import wait_until
 from tests.manager.conftest import DEMO
-from tests.manager.identity_http import KEYGEN, Device, Http
-from tests.sshsig_signer import generate_key
+from tests.manager.identity_http import Device, Http
+from tests.manager.server import Server, free_port, write_config
 from tsm_common import protocol as P
 from tsm_common.rules import ProjectRules, rules_digest
-from tsm_manager.db import Database
 
 pytestmark = pytest.mark.integration
 
 SPELLS = "data/scripts/spells.lua"
-
-
-def write_config(tmp: Path, root: Path, *, keygen: Path = KEYGEN) -> Path:
-    """Config ``version: 2`` local, com uma chave de host Ed25519 gerada para o teste."""
-    if not (tmp / "hostkey").exists():
-        generate_key(KEYGEN, tmp / "hostkey", "ssh_host_ed25519_key")
-    cfg = tmp / "cfg" / "manager.json"
-    cfg.parent.mkdir(parents=True, exist_ok=True)
-    cfg.write_text(json.dumps({
-        "version": 2, "root": str(root), "shared_group": "tsm-readers",
-        "workspace_group": "tsm-ws", "provisioner": {"mode": "local"},
-        "ssh": {"host": "127.0.0.1", "port": 22,
-                "host_key_files": [str(tmp / "hostkey" / "ssh_host_ed25519_key.pub")]},
-        "auth": {"ssh_keygen": str(keygen)},
-        "projects": [{"id": "demo"}, {"id": "outro"}],
-    }), encoding="utf-8")
-    return cfg
-
-
-class Server:
-    def __init__(self, tmp: Path) -> None:
-        self.tmp = tmp
-        self.root = tmp / "srv"
-        self.cfg = write_config(tmp, self.root)
-        self.port = free_port()
-        self.proc: subprocess.Popen | None = None
-        self.log = tmp / "serve.log"
-
-    def cli(self, *args: str, ok: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess:
-        r = subprocess.run([sys.executable, "-m", "tsm_manager", *args, "--config",
-                            str(self.cfg)], capture_output=True, text=True, encoding="utf-8",
-                           timeout=300)
-        assert r.returncode in ok, f"{args}: {r.returncode}\n{r.stdout}{r.stderr}"
-        return r
-
-    def start(self) -> None:
-        fh = open(self.log, "wb")  # noqa: SIM115 - herdado pelo processo filho
-        self.proc = subprocess.Popen(
-            [sys.executable, "-m", "tsm_manager", "serve", "--config", str(self.cfg),
-             "--port", str(self.port)], stdout=fh, stderr=subprocess.STDOUT)
-        fh.close()
-
-        def up() -> bool:
-            if self.proc.poll() is not None:
-                raise AssertionError(self.log.read_text("utf-8", "replace"))
-            return Http(self.port).get("/health").status == 200
-
-        wait_until(up, 60, 0.2, "Manager no ar")
-
-    def stop(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            self.proc.wait(10)
-
-    def device(self, n: int, name: str) -> Device:
-        return Device.create(self.port, self.tmp / "pcs" / f"pc{n}", n, name)
-
-    def audit(self, event: str) -> list[dict]:
-        db = Database(self.root / "manager" / "manager.db")
-        try:
-            with db.read() as conn:
-                rows = conn.execute("SELECT fields FROM audit_logs WHERE event = ? ORDER BY id",
-                                    (event,)).fetchall()
-        finally:
-            db.close()
-        return [json.loads(r["fields"]) for r in rows]
 
 
 @pytest.fixture(scope="module")

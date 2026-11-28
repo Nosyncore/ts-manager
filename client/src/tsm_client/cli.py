@@ -1,11 +1,10 @@
 """CLI ``tsm`` (argparse, sem dependências de terceiros em runtime).
 
-Origem da configuração (exclusivas):
-
-- ``--home DIR`` / ``TSM_HOME`` / padrão (``%LOCALAPPDATA%\\tsm``): config ``version: 3``,
-  identidade real (sessão por challenge-response);
-- ``--config ARQUIVO``: configs ``version: 1`` (transporte) e ``version: 2`` (colaboração com
-  a identidade de teste), mantidas só até a migração das suítes antigas.
+Origem da configuração: o diretório do tsm (``--home DIR`` / ``TSM_HOME`` / padrão
+``%LOCALAPPDATA%\\tsm``), com a config ``version: 3`` e a sessão por challenge-response.
+Quem chama ``run`` pode entregar um ``Config`` pronto (``config=``), como entrega o serviço
+(``service_factory``): sem ``<home>`` não há sessão, então só os comandos de transporte
+funcionam com ele.
 
 Identidade (só com o ``<home>``): enroll, whoami, bind, logout, admin.
 Transporte: doctor, up, status, flush, pause, resume, teardown.
@@ -43,8 +42,8 @@ from tsm_client.adapters.manager import (
 from tsm_client.adapters.mutagen import MutagenAdapter, MutagenError, SubprocessRunner, mutagen_env
 from tsm_client.adapters.sshkeygen import KeygenError
 from tsm_client.admin import AdminService, parse_duration, ssh_pending
-from tsm_client.collab import CollabService, PublishReport, PullReport, read_token
-from tsm_client.config import Config, ConfigError, load_config, load_home_config, read_home_config
+from tsm_client.collab import CollabService, PublishReport, PullReport
+from tsm_client.config import Config, ConfigError, load_home_config, read_home_config
 from tsm_client.enroll import Identity, Toolkit
 from tsm_client.home import Home, HomeError, resolve_home
 from tsm_client.login import IdentityPending, IdentityRefused, ManagerRefused
@@ -83,19 +82,16 @@ def default_service(cfg: Config) -> TransportService:
 
 
 def manager_client(cfg: Config, toolkit: Toolkit | None = None) -> ManagerClient:
-    """Cliente do Manager da config: sessão real (``version: 3``) ou token fixo (``2``)."""
-    assert cfg.manager is not None
-    if cfg.version == 3:
-        assert cfg.home is not None
-        identity = Identity(cfg.home, toolkit)
-        return identity.session(read_home_config(cfg.home))[0]
-    return ManagerClient(cfg.manager.url, read_token(cfg))
+    """Cliente do Manager autenticado pela sessão do dispositivo do ``<home>``."""
+    if cfg.home is None:
+        raise ConfigError("o Manager exige o diretório do tsm (tsm enroll)")
+    return Identity(cfg.home, toolkit).session(read_home_config(cfg.home))[0]
 
 
 def default_collab(cfg: Config, transport: TransportService, *,
                    toolkit: Toolkit | None = None) -> CollabService:
-    if not cfg.collab_enabled:
-        raise ConfigError("colaboração exige config version 2 ou o diretório do tsm")
+    if not cfg.collab_enabled or cfg.home is None:
+        raise ConfigError("colaboração exige o diretório do tsm (tsm enroll)")
     assert cfg.state_directory is not None
     store = StateStore(cfg.state_directory)
     git = ClientGit(find_git(cfg.git), store.git_global_config)
@@ -105,11 +101,8 @@ def default_collab(cfg: Config, transport: TransportService, *,
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="tsm", description="TS Manager — Client de terminal")
     p.add_argument("--version", action="version", version=f"tsm {__version__}")
-    src = p.add_mutually_exclusive_group()
-    src.add_argument("--home", default=None,
-                     help="diretório do tsm (padrão: TSM_HOME ou %%LOCALAPPDATA%%\\tsm)")
-    src.add_argument("--config", "-c", default=None,
-                     help="arquivo de configuração version 1/2 (suítes antigas)")
+    p.add_argument("--home", default=None,
+                   help="diretório do tsm (padrão: TSM_HOME ou %%LOCALAPPDATA%%\\tsm)")
     sub = p.add_subparsers(dest="command", required=True, metavar="comando")
 
     # ------------------------------------------------------------ identidade
@@ -680,7 +673,8 @@ def _refused_code(exc: ManagerRefused) -> int:
     return EXIT_REFUSED
 
 
-def run(argv: Sequence[str], *, service_factory: ServiceFactory = default_service,
+def run(argv: Sequence[str], *, config: Config | None = None,
+        service_factory: ServiceFactory = default_service,
         collab_factory: CollabFactory | None = None, toolkit: Toolkit | None = None,
         environ: Mapping[str, str] | None = None,
         out: TextIO | None = None, err: TextIO | None = None) -> int:
@@ -691,11 +685,10 @@ def run(argv: Sequence[str], *, service_factory: ServiceFactory = default_servic
     toolkit = toolkit or Toolkit()
     collab_factory = collab_factory or functools.partial(default_collab, toolkit=toolkit)
     try:
-        if args.config is not None:
-            if args.command in IDENTITY_COMMANDS:
-                raise ConfigError(f"'{args.command}' usa o diretório do tsm (--home), "
-                                  "não --config")
-            cfg = load_config(args.config)
+        if config is not None:
+            if args.command in IDENTITY_COMMANDS or args.home is not None:
+                raise ConfigError(f"'{args.command}' exige o diretório do tsm (--home)")
+            cfg = config
         else:
             home = resolve_home(args.home, os.environ if environ is None else environ)
             if args.command in IDENTITY_COMMANDS:

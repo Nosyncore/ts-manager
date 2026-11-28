@@ -2,13 +2,16 @@
 
 Layout em ``tmp_path``::
 
-    pcA/work pcA/cache pcA/mutagen-data pcA.json    (idem pcB)
+    pcA/work pcA/cache pcA/mutagen-data              (idem pcB)
     server/projects/demo/workspaces/devA|devB
     server/projects/demo/shared
     sentinel/            + sentinelas vizinhas a cada raiz
 
+Cada PC tem um ``Config`` de transporte montado em código (``tests/transport_config.py``) e
+entregue ao ``tsm`` por ``run(..., config=…)``: estes testes não usam Manager nem identidade.
+
 Restrição global (automática): tudo em ``tmp_path`` fora das raízes declaradas
-precisa estar idêntico ao fim do teste (sentinelas, configs, diretórios vizinhos), e
+precisa estar idêntico ao fim do teste (sentinelas, diretórios vizinhos), e
 nenhum temporário do Mutagen pode sobrar nos alphas.
 """
 
@@ -16,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import io
-import json
 import shutil
 import time
 from collections.abc import Callable
@@ -26,6 +28,7 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import REPO_ROOT
+from tests.transport_config import BindingSpec, transport_config
 from tsm_client.adapters.mutagen import (
     MutagenAdapter,
     SessionState,
@@ -34,7 +37,7 @@ from tsm_client.adapters.mutagen import (
     mutagen_env,
 )
 from tsm_client.cli import run as cli_run
-from tsm_client.config import load_config
+from tsm_client.config import Config
 from tsm_client.rules import IgnoreMatcher, ProjectRules, ignore_patterns
 from tsm_client.service import TransportService
 from tsm_client.treehash import manifest
@@ -62,7 +65,7 @@ def wait_until(pred: Callable[[], bool], timeout: float = DEFAULT_TIMEOUT, inter
 class Pc:
     name: str
     root: Path
-    cfg_path: Path
+    config: Config
     rules: ProjectRules
     exe: Path
     data_dir: Path
@@ -84,7 +87,7 @@ class Pc:
 
     @property
     def service(self) -> TransportService:
-        return TransportService(load_config(self.cfg_path), self.adapter)
+        return TransportService(self.config, self.adapter)
 
     @property
     def matcher(self) -> IgnoreMatcher:
@@ -92,7 +95,7 @@ class Pc:
 
     def tsm(self, *args: str, expect: int | None = 0) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
-        code = cli_run(["--config", str(self.cfg_path), *args], out=out, err=err)
+        code = cli_run(list(args), config=self.config, out=out, err=err)
         if expect is not None:
             msg = f"tsm {' '.join(args)} -> {code}\n{out.getvalue()}{err.getvalue()}"
             assert code == expect, msg
@@ -151,27 +154,15 @@ class Layout:
         return roots
 
 
-def write_config(pc_root: Path, cfg_path: Path, *, exe: Path, binding: str, workspace: str,
-                 shared: str, rules: ProjectRules, ssh_path: Path | None = None,
-                 ssh_home: Path | None = None) -> None:
-    mutagen: dict[str, str] = {"data_directory": str(pc_root / "mutagen-data"),
-                               "executable": str(exe)}
-    if ssh_path:
-        mutagen["ssh_path"] = str(ssh_path)
-    if ssh_home:
-        mutagen["ssh_home"] = str(ssh_home)
-    cfg = {
-        "version": 1,
-        "device_id": pc_root.name,
-        "mutagen": mutagen,
-        "bindings": [{
-            "id": binding, "project_id": "demo",
-            "local": str(pc_root / "work"), "cache": str(pc_root / "cache"),
-            "workspace": workspace, "shared": shared,
-            "rules": {"allow": list(rules.allow), "ignore": list(rules.ignore)},
-        }],
-    }
-    cfg_path.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+def pc_config(pc_root: Path, *, exe: Path, binding: str, workspace: str, shared: str,
+              rules: ProjectRules, ssh_path: Path | None = None,
+              ssh_home: Path | None = None) -> Config:
+    """``Config`` de transporte do PC: pasta e cache em ``pc_root``, daemon isolado."""
+    return transport_config(
+        pc_root, device_id=pc_root.name, data_directory=pc_root / "mutagen-data",
+        executable=exe, ssh_path=ssh_path, ssh_home=ssh_home,
+        bindings=[BindingSpec(binding, pc_root / "work", pc_root / "cache", workspace, shared,
+                              rules)])
 
 
 def make_layout(tmp_path: Path, exe: Path, rules: ProjectRules | None = None) -> Layout:
@@ -195,10 +186,9 @@ def make_layout(tmp_path: Path, exe: Path, rules: ProjectRules | None = None) ->
         pc_root = tmp_path / name
         shutil.copytree(DEMO, pc_root / "work")
         (pc_root / "sentinel.txt").write_text(f"vizinho de {name}\n", encoding="utf-8")
-        cfg_path = tmp_path / f"{name}.json"
-        write_config(pc_root, cfg_path, exe=exe, binding=binding,
-                     workspace=str(workspaces / dev), shared=str(project / "shared"), rules=rules)
-        layout.pcs[name] = Pc(name, pc_root, cfg_path, rules, exe, pc_root / "mutagen-data")
+        cfg = pc_config(pc_root, exe=exe, binding=binding, workspace=str(workspaces / dev),
+                        shared=str(project / "shared"), rules=rules)
+        layout.pcs[name] = Pc(name, pc_root, cfg, rules, exe, pc_root / "mutagen-data")
     return layout
 
 

@@ -58,7 +58,7 @@ def _device(account="tsm-d-0123456789ab"):
 def test_ssh_payload(tmp_path):
     layout = ProjectLayout(tmp_path / "srv", "demo")
     rules = ProjectRules.from_dict({"allow": ["data/"], "ignore": ["*.bak"]})
-    project = ProjectConfig("demo", rules, Limits(), {})
+    project = ProjectConfig("demo", rules, Limits())
     binding = Binding("b-1", "demo", "d-1", "tsm-d-0123456789ab", "t")
     out = connection_config(server_id="srv-1", project=project, layout=layout,
                             binding=binding, device=_device(),
@@ -79,7 +79,7 @@ def test_ssh_payload(tmp_path):
 
 def test_local_payload_has_no_ssh(tmp_path):
     layout = ProjectLayout(tmp_path / "srv", "demo")
-    project = ProjectConfig("demo", ProjectRules(), Limits(), {})
+    project = ProjectConfig("demo", ProjectRules(), Limits())
     binding = Binding("b-1", "demo", "d-1", "tsm-d-0123456789ab", "t")
     out = connection_config(server_id="s", project=project, layout=layout, binding=binding,
                             device=_device(), ssh=SshConfig("h", 22, (), "g"),
@@ -91,7 +91,7 @@ def test_local_payload_has_no_ssh(tmp_path):
 def test_unknown_transport_rejected(tmp_path):
     with pytest.raises(ValueError):
         connection_config(server_id="s", project=ProjectConfig("demo", ProjectRules(),
-                                                                Limits(), {}),
+                                                                Limits()),
                           layout=ProjectLayout(tmp_path, "demo"),
                           binding=Binding("b", "demo", "d", "tsm-d-0123456789ab", "t"),
                           device=_device(), ssh=None, host_keys=(), workspace_group="g",
@@ -101,7 +101,7 @@ def test_unknown_transport_rejected(tmp_path):
 def test_ssh_transport_requires_ssh_settings(tmp_path):
     with pytest.raises(ValueError):
         connection_config(server_id="s", project=ProjectConfig("demo", ProjectRules(),
-                                                                Limits(), {}),
+                                                                Limits()),
                           layout=ProjectLayout(tmp_path, "demo"),
                           binding=Binding("b", "demo", "d", "tsm-d-0123456789ab", "t"),
                           device=_device(), ssh=None, host_keys=(), workspace_group="g",

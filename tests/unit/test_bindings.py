@@ -28,10 +28,7 @@ def test_db_bindings_satisfy_the_interface(ctx):
     assert source.get("x") is None
 
 
-def test_workspace_path_by_source(ctx, tmp_path):
-    from tsm_common.rules import ProjectRules
-    from tsm_manager.bindings import ConfigBindings
-    from tsm_manager.config import Limits, ProjectConfig
+def test_workspace_path_is_the_tree_of_the_account(ctx, tmp_path):
     from tsm_manager.layout import ProjectLayout
 
     layout = ProjectLayout(tmp_path / "srv", "demo")
@@ -40,6 +37,3 @@ def test_workspace_path_by_source(ctx, tmp_path):
     binding = db.get("b-dev-u1")
     assert db.workspace_path(layout, binding) == layout.sync_root(binding.workspace)
     assert db.workspace_path(layout, binding).name == "tree"
-    cfg = ConfigBindings(ProjectConfig("demo", ProjectRules(), Limits(), {
-        "demo-pca": BindingConfig("demo-pca", "pca", "pca")}))
-    assert cfg.workspace_path(layout, cfg.get("demo-pca")) == layout.workspace("pca")

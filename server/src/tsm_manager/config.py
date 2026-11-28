@@ -22,26 +22,9 @@ Formato ``version: 2`` (JSON)::
       "projects": [{"id": "demo", "rules": {"allow": [], "ignore": []}, "limits": {}}]
     }
 
-Usuários, dispositivos e vínculos ficam no banco. O formato ``version: 1`` abaixo, com
-vínculos e identidades de teste na própria config, ainda é aceito e será removido::
-
-    {
-      "version": 1,
-      "root": "/srv/ts",
-      "database": "manager/manager.db",       # opcional; relativo a root, sempre sob root
-      "shared_group": "tsm-readers",          # opcional (POSIX): grupo de leitura do shared
-      "test_faults": false,                   # opcional: aceita falhas injetadas (só testes)
-      "projects": [{
-        "id": "demo",
-        "rules": {"allow": [], "ignore": []},
-        "limits": {"max_file_bytes": 104857600, "max_files": 2000,
-                   "max_total_bytes": 1073741824, "max_path_chars": 200},
-        "bindings": [{"id": "demo-pca", "device": "pca", "workspace": "pca"}]
-      }],
-      "identities": [
-        {"name": "dev-a", "role": "developer", "device": "pca", "token_sha256": "<hex>"}
-      ]
-    }
+Usuários, dispositivos e vínculos ficam no banco (cadastro com convite e aprovação), não
+na config. A ``version: 1``, com identidades de teste e vínculos na própria config, é
+recusada com uma mensagem de migração.
 
 ``root`` relativo é resolvido a partir do diretório do arquivo de config; ``database``
 relativo, a partir de ``root``. Um banco que resolva para fora de ``root`` é recusado: todo
@@ -63,15 +46,14 @@ from tsm_common.pathpolicy import DEFAULT_MAX_PATH_CHARS
 from tsm_common.rules import ProjectRules, RulesError
 from tsm_manager.adapters.sshsig import default_executable
 
-CONFIG_VERSION = 1  # identidade de teste; será removida
-CONFIG_VERSION_V2 = 2
-CONFIG_VERSIONS = (CONFIG_VERSION, CONFIG_VERSION_V2)
+CONFIG_VERSION = 2
 PROVISIONER_MODES = ("local", "sudo")
 DEFAULT_DATABASE = "manager/manager.db"
-ROLES = ("developer", "admin")
 _ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,47}$")
-_DEVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$")
-_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+V1_MIGRATION = (
+    "config.version 1 (identidade de teste) não é mais aceita; use a version 2: remova "
+    "identities e projects[].bindings (usuários, dispositivos e vínculos ficam no banco: "
+    "bootstrap-admin, convites e aprovação) e inclua workspace_group e provisioner")
 _GROUP_RE = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
 _HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 DAY = 86_400
@@ -102,9 +84,11 @@ class Limits:
 
 @dataclass(frozen=True)
 class BindingConfig:
+    """Vínculo de um dispositivo a um projeto (lido do banco pela ``DbBindings``)."""
+
     id: str
-    device: str
-    workspace: str  # nome do diretório em workspaces/
+    device: str     # UUID do dispositivo
+    workspace: str  # conta do dispositivo: workspaces/<conta>/tree
 
 
 @dataclass(frozen=True)
@@ -112,19 +96,6 @@ class ProjectConfig:
     id: str
     rules: ProjectRules
     limits: Limits
-    bindings: Mapping[str, BindingConfig]
-
-
-@dataclass(frozen=True)
-class Identity:
-    name: str
-    role: str
-    device: str | None
-    token_sha256: str
-
-    @property
-    def is_admin(self) -> bool:
-        return self.role == "admin"
 
 
 @dataclass(frozen=True)
@@ -173,26 +144,18 @@ class ManagerConfig:
     path: Path
     root: Path
     projects: Mapping[str, ProjectConfig]
-    identities: tuple[Identity, ...]
     database: Path
-    shared_group: str | None = None
-    test_faults: bool = False
-    version: int = CONFIG_VERSION
-    workspace_group: str | None = None
+    shared_group: str
+    workspace_group: str
+    provisioner: ProvisionerConfig
+    auth: AuthConfig
     ssh: SshConfig | None = None
-    provisioner: ProvisionerConfig | None = None
-    auth: AuthConfig | None = None
-    extra: Mapping[str, Any] = field(default_factory=dict)
+    test_faults: bool = False
 
     @property
     def backups(self) -> Path:
         """Cópias do banco feitas antes de cada migration."""
         return self.database.parent / "backups"
-
-    @property
-    def is_v2(self) -> bool:
-        """Identidade real (sessões, vínculos no banco); ``False`` = identidade de teste."""
-        return self.version == CONFIG_VERSION_V2
 
 
 def _obj(value: Any, where: str, allowed: set[str], required: set[str]) -> Mapping[str, Any]:
@@ -239,87 +202,12 @@ def load_manager_config(path: str | os.PathLike[str]) -> ManagerConfig:
     except json.JSONDecodeError as exc:
         raise ManagerConfigError(f"{cfg_path}: JSON inválido: {exc}") from exc
 
-    if isinstance(data, dict) and data.get("version") not in CONFIG_VERSIONS:
-        raise ManagerConfigError(
-            f"config.version: suportadas {', '.join(map(str, CONFIG_VERSIONS))}")
-    if isinstance(data, dict) and data.get("version") == CONFIG_VERSION_V2:
-        return _load_v2(cfg_path, data)
-    top = _obj(data, "config",
-               {"version", "root", "database", "shared_group", "test_faults", "projects",
-                "identities"},
-               {"version", "root", "projects", "identities"})
-    if top["version"] != CONFIG_VERSION:
-        raise ManagerConfigError(
-            f"config.version: suportadas {', '.join(map(str, CONFIG_VERSIONS))}")
-    root = Path(_text(top, "root", "config"))
-    if not root.is_absolute():
-        root = (cfg_path.parent / root).resolve()
-    database = _database(top, root)
-
-    projects: dict[str, ProjectConfig] = {}
-    if not isinstance(top["projects"], list) or not top["projects"]:
-        raise ManagerConfigError("config.projects: esperada uma lista não vazia")
-    devices_in_use: dict[str, str] = {}
-    for i, rp in enumerate(top["projects"]):
-        where = f"projects[{i}]"
-        p = _obj(rp, where, {"id", "rules", "limits", "bindings"}, {"id", "bindings"})
-        pid = _text(p, "id", where, _ID_RE)
-        if pid in projects:
-            raise ManagerConfigError(f"{where}.id duplicado: {pid}")
-        try:
-            rules = ProjectRules.from_dict(p.get("rules"))
-        except RulesError as exc:
-            raise ManagerConfigError(f"{where}.rules: {exc}") from exc
-        bindings: dict[str, BindingConfig] = {}
-        workspaces: set[str] = set()
-        if not isinstance(p["bindings"], list):
-            raise ManagerConfigError(f"{where}.bindings: esperada uma lista")
-        for j, rb in enumerate(p["bindings"]):
-            bw = f"{where}.bindings[{j}]"
-            b = _obj(rb, bw, {"id", "device", "workspace"}, {"id", "device", "workspace"})
-            bid = _text(b, "id", bw, _ID_RE)
-            if bid in bindings:
-                raise ManagerConfigError(f"{bw}.id duplicado: {bid}")
-            ws = _text(b, "workspace", bw, _DEVICE_RE)
-            if ws in workspaces:
-                raise ManagerConfigError(f"{bw}.workspace já usado por outro vínculo: {ws}")
-            workspaces.add(ws)
-            device = _text(b, "device", bw, _DEVICE_RE)
-            key = f"{pid}/{device}"
-            if key in devices_in_use:
-                raise ManagerConfigError(f"{bw}: o dispositivo {device} já tem vínculo em {pid}")
-            devices_in_use[key] = bid
-            bindings[bid] = BindingConfig(bid, device, ws)
-        projects[pid] = ProjectConfig(pid, rules, _limits(p.get("limits"), f"{where}.limits"),
-                                      bindings)
-
-    identities: list[Identity] = []
-    tokens: set[str] = set()
-    if not isinstance(top["identities"], list):
-        raise ManagerConfigError("config.identities: esperada uma lista")
-    for i, ri in enumerate(top["identities"]):
-        where = f"identities[{i}]"
-        it = _obj(ri, where, {"name", "role", "device", "token_sha256"},
-                  {"name", "role", "token_sha256"})
-        role = _text(it, "role", where)
-        if role not in ROLES:
-            raise ManagerConfigError(f"{where}.role: use {' ou '.join(ROLES)}")
-        token = _text(it, "token_sha256", where, _HEX64_RE)
-        if token in tokens:
-            raise ManagerConfigError(f"{where}: token repetido")
-        tokens.add(token)
-        device = it.get("device")
-        if device is not None and (not isinstance(device, str) or not _DEVICE_RE.match(device)):
-            raise ManagerConfigError(f"{where}.device: valor inválido")
-        identities.append(Identity(_text(it, "name", where), role, device, token))
-
-    group = top.get("shared_group")
-    if group is not None and (not isinstance(group, str) or not group):
-        raise ManagerConfigError("config.shared_group: esperado texto não vazio")
-    faults = top.get("test_faults", False)
-    if not isinstance(faults, bool):
-        raise ManagerConfigError("config.test_faults: esperado booleano")
-    return ManagerConfig(cfg_path, root, projects, tuple(identities), database, group, faults)
+    version = data.get("version") if isinstance(data, dict) else None
+    if version == 1 and not isinstance(version, bool):
+        raise ManagerConfigError(V1_MIGRATION)
+    if version != CONFIG_VERSION or isinstance(version, bool):
+        raise ManagerConfigError(f"config.version: suportada: {CONFIG_VERSION}")
+    return _load(cfg_path, data)
 
 
 def _database(top: Mapping[str, Any], root: Path) -> Path:
@@ -332,9 +220,6 @@ def _database(top: Mapping[str, Any], root: Path) -> Path:
     if resolved == root_real or not resolved.is_relative_to(root_real):
         raise ManagerConfigError(f"config.database: {raw!r} fica fora de root ({root})")
     return resolved
-
-
-# ---------------------------------------------------------------- version 2
 
 
 def _int(obj: Mapping[str, Any], key: str, where: str, default: int, lo: int, hi: int) -> int:
@@ -429,7 +314,7 @@ def _auth(raw: Any) -> AuthConfig:
     )
 
 
-def _load_v2(cfg_path: Path, data: Mapping[str, Any]) -> ManagerConfig:
+def _load(cfg_path: Path, data: Mapping[str, Any]) -> ManagerConfig:
     top = _obj(data, "config",
                {"version", "root", "database", "shared_group", "workspace_group", "ssh",
                 "provisioner", "auth", "test_faults", "projects"},
@@ -452,8 +337,7 @@ def _load_v2(cfg_path: Path, data: Mapping[str, Any]) -> ManagerConfig:
             rules = ProjectRules.from_dict(p.get("rules"))
         except RulesError as exc:
             raise ManagerConfigError(f"{where}.rules: {exc}") from exc
-        projects[pid] = ProjectConfig(pid, rules, _limits(p.get("limits"), f"{where}.limits"),
-                                      {})
+        projects[pid] = ProjectConfig(pid, rules, _limits(p.get("limits"), f"{where}.limits"))
     provisioner = _provisioner(top["provisioner"])
     ssh = _ssh(top["ssh"]) if "ssh" in top else None
     if provisioner.mode == "sudo" and ssh is None:
@@ -462,7 +346,7 @@ def _load_v2(cfg_path: Path, data: Mapping[str, Any]) -> ManagerConfig:
     if not isinstance(faults, bool):
         raise ManagerConfigError("config.test_faults: esperado booleano")
     return ManagerConfig(
-        cfg_path, root, projects, (), database,
-        shared_group=_group(top, "shared_group", "config"), test_faults=faults,
-        version=CONFIG_VERSION_V2, workspace_group=_group(top, "workspace_group", "config"),
-        ssh=ssh, provisioner=provisioner, auth=_auth(top.get("auth")))
+        cfg_path, root, projects, database,
+        shared_group=_group(top, "shared_group", "config"),
+        workspace_group=_group(top, "workspace_group", "config"),
+        provisioner=provisioner, auth=_auth(top.get("auth")), ssh=ssh, test_faults=faults)

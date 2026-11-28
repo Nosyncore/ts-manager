@@ -40,8 +40,8 @@ from tsm_manager.adapters.fs import (
     scan_files,
 )
 from tsm_manager.adapters.git import Author, CommitInfo, Git
-from tsm_manager.bindings import BindingSource, ConfigBindings
-from tsm_manager.config import BindingConfig, Identity, ProjectConfig
+from tsm_manager.bindings import BindingSource
+from tsm_manager.config import BindingConfig, ProjectConfig
 from tsm_manager.db.connection import Database
 from tsm_manager.faults import Faults
 from tsm_manager.layout import ProjectLayout
@@ -95,12 +95,6 @@ class Requester:
     user_id: str
     device_id: str | None
     is_admin: bool
-
-    @classmethod
-    def of(cls, who: Requester | Identity) -> Requester:
-        if isinstance(who, Requester):
-            return who
-        return cls(who.name, who.name, who.device, who.is_admin)
 
     @property
     def user_id_trailer(self) -> str | None:
@@ -278,9 +272,7 @@ class ProjectService:
 
     # ================================================================ publicação
 
-    def publish(self, identity: Requester | Identity, binding: BindingConfig,
-                body: Any) -> Outcome:
-        identity = Requester.of(identity)
+    def publish(self, identity: Requester, binding: BindingConfig, body: Any) -> Outcome:
         try:
             req = parse_publish_request(body)
         except RequestError as exc:
@@ -441,8 +433,7 @@ class ProjectService:
 
     # ================================================================ rollback
 
-    def rollback(self, identity: Requester | Identity, body: Any) -> Outcome:
-        identity = Requester.of(identity)
+    def rollback(self, identity: Requester, body: Any) -> Outcome:
         if not identity.is_admin:
             return Outcome(P.FORBIDDEN, {"message": "rollback exige admin"})
         if not isinstance(body, dict):
@@ -630,16 +621,16 @@ class ProjectService:
 
 
 def open_project(root: Path, project: ProjectConfig, db: Database, *,
-                 shared_group: str | None = None, git_executable: str = "git",
-                 faults: Faults | None = None, lock_timeout: float = LOCK_TIMEOUT,
-                 bindings: BindingSource | None = None) -> ProjectService:
+                 bindings: BindingSource, shared_group: str | None = None,
+                 git_executable: str = "git", faults: Faults | None = None,
+                 lock_timeout: float = LOCK_TIMEOUT) -> ProjectService:
     """``ProjectService`` com Git interno, ``Store`` no banco e a fonte de vínculos dada
-    (padrão: os da config ``version: 1``; com identidade real, ``DbBindings``)."""
+    (no Manager, a ``DbBindings`` do projeto)."""
     layout = ProjectLayout(root, project.id)
     git = Git(layout.repo, executable=git_executable, global_config=layout.git_global_config,
               tmp_dir=layout.tmp)
     return ProjectService(project, layout, git=git, store=Store(db, project.id),
-                          bindings=bindings or ConfigBindings(project),
+                          bindings=bindings,
                           shared_group=shared_group, faults=faults, lock_timeout=lock_timeout)
 
 

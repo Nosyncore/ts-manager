@@ -2,7 +2,18 @@ import json
 
 import pytest
 
-from tsm_client.config import ConfigError, load_config, verify_project_folder
+from tests.transport_config import BindingSpec, transport_config
+from tsm_client.config import (
+    ConfigError,
+    MutagenSettings,
+    check_own_dirs,
+    read_home_config,
+    verify_project_folder,
+)
+from tsm_client.home import Home
+from tsm_client.paths import Endpoint
+from tsm_client.rules import ProjectRules
+from tsm_client.sessions import Binding
 
 
 def write(path, data):
@@ -10,148 +21,76 @@ def write(path, data):
     return path
 
 
+def spec(**kw) -> BindingSpec:
+    data = {"id": "demo-pca", "local": "pcA/work", "cache": "pcA/cache",
+            "workspace": "server/projects/demo/workspaces/devA",
+            "shared": "server/projects/demo/shared", "rules": ProjectRules(ignore=("*.bak",))}
+    data.update(kw)
+    return BindingSpec(**data)
+
+
 @pytest.fixture
-def cfg_data(tmp_path):
-    return {
-        "version": 1,
-        "device_id": "pca",
-        "mutagen": {"data_directory": "pcA/mutagen-data", "executable": str(tmp_path / "m.exe")},
-        "bindings": [
-            {
-                "id": "demo-pca",
-                "project_id": "demo",
-                "local": "pcA/work",
-                "cache": "pcA/cache",
-                "workspace": "server/projects/demo/workspaces/devA",
-                "shared": "server/projects/demo/shared",
-                "rules": {"ignore": ["*.bak"]},
-            }
-        ],
-    }
+def cfg(tmp_path):
+    return transport_config(tmp_path, device_id="pca", data_directory="pcA/mutagen-data",
+                            executable=tmp_path / "m.exe", bindings=[spec()])
 
 
-def test_load_resolves_relative_paths_against_config_dir(tmp_path, cfg_data):
-    cfg = load_config(write(tmp_path / "pcA.json", cfg_data))
+def test_transport_config_resolves_relative_paths(tmp_path, cfg):
     b = cfg.bindings[0]
     assert b.local.path == str((tmp_path / "pcA" / "work").resolve())
+    assert b.workspace.path == str((tmp_path / "server/projects/demo/workspaces/devA").resolve())
     assert cfg.mutagen.data_directory == (tmp_path / "pcA" / "mutagen-data").resolve()
     assert b.rules.ignore == ("*.bak",)
-    assert cfg.device_id == "pca"
+    assert not cfg.collab_enabled and cfg.home is None and cfg.manager is None
 
 
-def test_remote_endpoints_kept(tmp_path, cfg_data):
-    cfg_data["bindings"][0]["workspace"] = "tsm-test-a:/srv/ts/projects/demo/workspaces/dev-a"
-    cfg = load_config(write(tmp_path / "c.json", cfg_data))
-    assert cfg.bindings[0].workspace.host == "tsm-test-a"
+def test_remote_endpoints_kept(tmp_path):
+    cfg = transport_config(tmp_path, device_id="pca", data_directory="m", bindings=[
+        spec(workspace="tsm-a:/srv/ts/projects/demo/workspaces/a",
+             shared="tsm-a:/srv/ts/projects/demo/shared")])
+    assert cfg.bindings[0].workspace.host == "tsm-a"
 
 
-@pytest.mark.parametrize("missing", ["version", "device_id", "mutagen", "bindings"])
-def test_required_top_level_fields(tmp_path, cfg_data, missing):
-    del cfg_data[missing]
-    with pytest.raises(ConfigError, match=missing):
-        load_config(write(tmp_path / "c.json", cfg_data))
+def _settings(tmp_path, **kw) -> MutagenSettings:
+    base = {"data_directory": tmp_path / "m", "executable": None, "ssh_path": None,
+            "ssh_home": None}
+    base.update(kw)
+    return MutagenSettings(**base)
 
 
-@pytest.mark.parametrize("missing", ["id", "project_id", "local", "cache", "workspace", "shared"])
-def test_required_binding_fields(tmp_path, cfg_data, missing):
-    del cfg_data["bindings"][0][missing]
-    with pytest.raises(ConfigError, match=missing):
-        load_config(write(tmp_path / "c.json", cfg_data))
+def _binding(tmp_path) -> Binding:
+    return Binding(id="b", project_id="demo", local=Endpoint(None, str(tmp_path / "work")),
+                   cache=Endpoint(None, str(tmp_path / "cache")),
+                   workspace=Endpoint(None, str(tmp_path / "ws")),
+                   shared=Endpoint(None, str(tmp_path / "shared")), rules=ProjectRules())
 
 
-def test_unknown_fields_rejected(tmp_path, cfg_data):
-    cfg_data["bindings"][0]["mode"] = "two-way-safe"
-    with pytest.raises(ConfigError, match="mode"):
-        load_config(write(tmp_path / "c.json", cfg_data))
+@pytest.mark.parametrize("key", ["data_directory", "ssh_home"])
+def test_own_dirs_cannot_be_inside_an_endpoint(tmp_path, key):
+    settings = _settings(tmp_path, **{key: tmp_path / "work" / "x"})
+    with pytest.raises(ConfigError, match=key):
+        check_own_dirs(settings, None, [_binding(tmp_path)])
 
 
-def test_wrong_version(tmp_path, cfg_data):
-    cfg_data["version"] = 3
-    with pytest.raises(ConfigError, match="version"):
-        load_config(write(tmp_path / "c.json", cfg_data))
-
-
-def test_v2_requires_state_and_manager(tmp_path, cfg_data):
-    cfg_data["version"] = 2
+def test_state_directory_cannot_overlap_an_endpoint(tmp_path):
     with pytest.raises(ConfigError, match="state_directory"):
-        load_config(write(tmp_path / "c.json", cfg_data))
+        check_own_dirs(_settings(tmp_path), tmp_path / "cache", [_binding(tmp_path)])
+    check_own_dirs(_settings(tmp_path), tmp_path / "state", [_binding(tmp_path)])
 
 
-def test_v2_fields(tmp_path, cfg_data):
-    cfg_data["version"] = 2
-    cfg_data["state_directory"] = "state"
-    cfg_data["manager"] = {"url": "http://127.0.0.1:8740/", "token_file": "tok"}
-    cfg = load_config(write(tmp_path / "c.json", cfg_data))
-    assert cfg.collab_enabled
-    assert cfg.manager.url == "http://127.0.0.1:8740"
-    assert cfg.state_directory == (tmp_path / "state").resolve()
-    assert cfg.manager.token_file == (tmp_path / "tok").resolve()
-
-
-def test_v2_state_directory_cannot_overlap(tmp_path, cfg_data):
-    cfg_data["version"] = 2
-    cfg_data["state_directory"] = cfg_data["bindings"][0]["local"] + "/state"
-    cfg_data["manager"] = {"url": "http://127.0.0.1:1", "token_file": "tok"}
-    with pytest.raises(ConfigError, match="state_directory"):
-        load_config(write(tmp_path / "c.json", cfg_data))
-
-
-def test_v2_manager_url_scheme(tmp_path, cfg_data):
-    cfg_data["version"] = 2
-    cfg_data["state_directory"] = "state"
-    cfg_data["manager"] = {"url": "ftp://x", "token_file": "tok"}
-    with pytest.raises(ConfigError, match="manager.url"):
-        load_config(write(tmp_path / "c.json", cfg_data))
-
-
-def test_invalid_json(tmp_path):
-    p = tmp_path / "c.json"
-    p.write_text("{nope", encoding="utf-8")
-    with pytest.raises(ConfigError, match="JSON"):
-        load_config(p)
-
-
-def test_missing_file(tmp_path):
-    with pytest.raises(ConfigError, match="não encontrado"):
-        load_config(tmp_path / "nao-existe.json")
-
-
-def test_data_directory_inside_endpoint_rejected(tmp_path, cfg_data):
-    cfg_data["mutagen"]["data_directory"] = "pcA/work/.mutagen"
-    with pytest.raises(ConfigError, match="data_directory"):
-        load_config(write(tmp_path / "c.json", cfg_data))
-
-
-def test_ssh_home_inside_endpoint_rejected(tmp_path, cfg_data):
-    cfg_data["mutagen"]["ssh_home"] = "pcA/cache/home"
-    with pytest.raises(ConfigError, match="ssh_home"):
-        load_config(write(tmp_path / "c.json", cfg_data))
-
-
-def test_invalid_rules_reported_as_config_error(tmp_path, cfg_data):
-    cfg_data["bindings"][0]["rules"] = {"ignore": ["../x"]}
-    with pytest.raises(ConfigError, match="rules"):
-        load_config(write(tmp_path / "c.json", cfg_data))
-
-
-def test_invalid_endpoint_reported_as_config_error(tmp_path, cfg_data):
-    cfg_data["bindings"][0]["workspace"] = "user@host:/srv"
-    with pytest.raises(ConfigError, match="workspace"):
-        load_config(write(tmp_path / "c.json", cfg_data))
-
-
-def test_duplicate_binding_ids(tmp_path, cfg_data):
-    cfg_data["bindings"].append(dict(cfg_data["bindings"][0]))
-    with pytest.raises(ConfigError, match="duplicado"):
-        load_config(write(tmp_path / "c.json", cfg_data))
+@pytest.mark.parametrize("version", [1, 2])
+def test_old_config_in_home_is_refused_with_migration_message(tmp_path, version):
+    home = Home(tmp_path / "home")
+    home.root.mkdir()
+    write(home.config_path, {"version": version, "device_id": "pca", "mutagen": {},
+                             "bindings": []})
+    with pytest.raises(ConfigError) as exc:
+        read_home_config(home)
+    msg = str(exc.value)
+    assert f"version {version}" in msg and "não é mais aceita" in msg and "tsm enroll" in msg
 
 
 # ---------- ts-project.json ----------
-
-
-@pytest.fixture
-def cfg(tmp_path, cfg_data):
-    return load_config(write(tmp_path / "pcA.json", cfg_data))
 
 
 def test_project_file_ok(tmp_path, cfg):

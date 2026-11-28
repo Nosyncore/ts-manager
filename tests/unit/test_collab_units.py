@@ -10,6 +10,7 @@ from typing import ClassVar
 
 import pytest
 
+from tests.unit.client_fakes import HeaderAuth
 from tsm_client.adapters.manager import ManagerClient, ManagerUnavailable
 from tsm_client.changes import (
     ADDED,
@@ -160,7 +161,7 @@ def test_http_client_results(server):
         ("GET", "/projects/demo/audit"): (403, {"status": "forbidden"}),
         ("GET", "/projects/bad"): (500, b"nada"),
     }
-    c = ManagerClient(url, "segredo", timeout=5)
+    c = ManagerClient(url, HeaderAuth("segredo"), timeout=5)
     r = c.project("demo")
     assert r.ok and r.body["head"]["revision"] == 2
     r = c.publish("demo", "demo-pca", {"x": 1})
@@ -182,4 +183,4 @@ def test_http_client_unavailable():
     port = s.getsockname()[1]
     s.close()
     with pytest.raises(ManagerUnavailable):
-        ManagerClient(f"http://127.0.0.1:{port}", "t", timeout=2).project("demo")
+        ManagerClient(f"http://127.0.0.1:{port}", HeaderAuth("t"), timeout=2).project("demo")

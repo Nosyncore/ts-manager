@@ -15,6 +15,7 @@ from tests.unit.client_fakes import (
     TOKEN,
     TOKEN2,
     FakeKeygen,
+    HeaderAuth,
     RecordingAcl,
     ScriptedTransport,
     challenge_body,
@@ -27,7 +28,6 @@ from tsm_client.adapters.manager import (
     ManagerUnavailable,
     ManagerUrlError,
     RateLimited,
-    StaticToken,
     UrllibTransport,
     check_url,
 )
@@ -300,11 +300,16 @@ def test_refused_urls(url):
         check_url(url)
 
 
-def test_static_token_header():
+def test_client_without_session_sends_no_authorization():
     t = ScriptedTransport().on("GET", "/projects/demo", 401, {"status": "unauthorized"})
-    r = ManagerClient(URL, StaticToken("segredo"), transport=t).project("demo")
+    r = ManagerClient(URL, transport=t).project("demo")
     assert r.http_status == 401
-    assert t.requests[0]["headers"]["Authorization"] == "Bearer segredo"
+    assert "Authorization" not in t.requests[0]["headers"]
+
+
+def test_client_does_not_accept_a_fixed_token():
+    with pytest.raises(TypeError):
+        ManagerClient(URL, "segredo", transport=ScriptedTransport())
 
 
 def test_network_failure():
@@ -337,7 +342,7 @@ def test_redirect_is_not_followed():
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
         _Redirect.seen = []
-        client = ManagerClient(f"http://127.0.0.1:{srv.server_address[1]}", "segredo",
+        client = ManagerClient(f"http://127.0.0.1:{srv.server_address[1]}", HeaderAuth("segredo"),
                                transport=UrllibTransport(), timeout=5)
         with pytest.raises(ManagerProtocolError):  # 302 sem corpo JSON, sem seguir
             client.project("demo")

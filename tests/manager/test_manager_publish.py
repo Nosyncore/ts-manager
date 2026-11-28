@@ -9,15 +9,14 @@ from pathlib import Path
 import pytest
 
 from tests.manager.conftest import (
-    DEV_A,
     Dev,
     assert_shared_is_main,
     demo_files,
     dev,
     main_files,
     make_project,
-    migrated_db,
     open_service,
+    person,
     refs,
     reopen,
     sha,
@@ -53,7 +52,7 @@ def test_distinct_files_merge_cleanly(svc, a, b):
     assert info.revision == 3
     # vínculos: cada um aponta para o próprio commit, ancestral de main
     bindings = svc.binding_refs()
-    assert bindings == {"demo-pca": ra.payload["commit"], "demo-pcb": rb.payload["commit"]}
+    assert bindings == {a.binding.id: ra.payload["commit"], b.binding.id: rb.payload["commit"]}
 
 
 def test_same_file_non_adjacent_lines(svc, a, b):
@@ -267,46 +266,41 @@ def test_content_already_in_main_is_no_change(svc, a, b):
     assert a.publish([SPELLS]).status == "published"
     out = b.publish([SPELLS])
     assert out.status == "no_change"
-    assert "demo-pcb" not in svc.binding_refs()
+    assert b.binding.id not in svc.binding_refs()
 
 
 # ----------------------------------------------------------------
 
 
-def _concurrent_publish(root: str, which: str, idx: int) -> str:
-    from tsm_manager.config import BindingConfig, Limits, ProjectConfig
+def _concurrent_publish(root: str, binding_id: str, name: str, user_id: str, device_id: str,
+                        idx: int) -> str:
+    from tsm_manager.config import Limits, ProjectConfig
+    from tsm_manager.project import Requester
 
-    project = ProjectConfig("demo", ProjectRules(), Limits(), {
-        f"demo-{which}": BindingConfig(f"demo-{which}", which, which)})
-    svc = open_service(Path(root), project, lock_timeout=120)
-    from tsm_manager.config import Identity
-
-    ident = Identity(which, "developer", which, "d" * 64)
-    d = Dev(svc, ident, project.bindings[f"demo-{which}"], svc.git.resolve("refs/heads/main"),
+    svc = open_service(Path(root), ProjectConfig("demo", ProjectRules(), Limits()),
+                       lock_timeout=120)
+    who = Requester(name, user_id, device_id, False)
+    d = Dev(svc, who, svc.bindings.get(binding_id), svc.git.resolve("refs/heads/main"),
             demo_files())
-    rel = f"data/conc/{which}.lua"
+    rel = f"data/conc/{name}.lua"
     d.write(rel, f"return {idx}\n")
     return d.publish([rel]).status
 
 
 def test_concurrent_publications_are_serialized(tmp_path):
     names = [f"p{i}" for i in range(8)]
-    from tsm_manager.config import BindingConfig, Limits, ProjectConfig
-    from tsm_manager.project import open_project
-
-    project = ProjectConfig("demo", ProjectRules(), Limits(), {
-        f"demo-{n}": BindingConfig(f"demo-{n}", n, n) for n in names})
-    svc = open_project(tmp_path / "srv", project, migrated_db(tmp_path / "srv"))
-    svc.init_project(Path(__file__).resolve().parents[2] / "examples" / "demo-project")
+    svc = make_project(tmp_path, people=tuple(names))
+    people = [person(svc, n) for n in names]
     ctx = multiprocessing.get_context("spawn")
     with ctx.Pool(8) as pool:
-        results = pool.starmap(_concurrent_publish,
-                               [(str(tmp_path / "srv"), n, i) for i, n in enumerate(names)])
+        results = pool.starmap(_concurrent_publish, [
+            (str(tmp_path / "srv"), p.binding.id, p.name, p.user_id, p.device_id, i)
+            for i, p in enumerate(people)])
     assert results == ["published"] * 8
     revs = svc.revisions(100)
     assert [r["revision"] for r in revs] == list(range(9, 0, -1))
     files = main_files(svc)
-    assert {f"data/conc/{n}.lua" for n in names} <= set(files)
+    assert {f"data/conc/{p.name}.lua" for p in people} <= set(files)
     assert_shared_is_main(svc)
 
 
@@ -403,4 +397,5 @@ def test_identity_mismatch_is_caller_concern(svc, a):
     out = a.publish([SPELLS], message="teste")
     assert out.status == "published"
     ev = svc.store.read_audit(1)[0]
-    assert ev["user"] == DEV_A.name and ev["binding"] == "demo-pca"
+    assert ev["binding"] == a.binding.id  # auditoria com os UUIDs, não o nome de exibição
+    assert ev["user"] == a.identity.user_id and ev["device"] == a.identity.device_id

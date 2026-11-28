@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.integration.conftest import DEMO, Pc, _outside_snapshot, write_config
+from tests.integration.conftest import DEMO, Pc, _outside_snapshot, pc_config
 from tsm_client.rules import IgnoreMatcher, ProjectRules
 
 SSH_DIR = Path(os.environ.get("TSM_SSH_PATH", r"C:\Program Files\Git\usr\bin"))
@@ -180,10 +180,10 @@ def remote_layout(tmp_path, target, mutagen_exe) -> Iterator[RemoteLayout]:
         pc_root = tmp_path / pc_name
         shutil.copytree(DEMO, pc_root / "work")
         home = _managed_home(pc_root / "ssh-home", target, user=user, alias=alias)
-        cfg = tmp_path / f"{pc_name}.json"
-        write_config(pc_root, cfg, exe=mutagen_exe, binding=f"poc-{pc_name.lower()}",
-                     workspace=f"{alias}:{lay.workspace(dev)}", shared=f"{alias}:{lay.shared}",
-                     rules=rules, ssh_path=SSH_DIR, ssh_home=home)
+        cfg = pc_config(pc_root, exe=mutagen_exe, binding=f"poc-{pc_name.lower()}",
+                        workspace=f"{alias}:{lay.workspace(dev)}",
+                        shared=f"{alias}:{lay.shared}", rules=rules, ssh_path=SSH_DIR,
+                        ssh_home=home)
         lay.pcs[pc_name] = Pc(pc_name, pc_root, cfg, rules, mutagen_exe,
                               pc_root / "mutagen-data", ssh_path=SSH_DIR, ssh_home=home)
     before = _outside_snapshot(tmp_path, lay.mutable_roots())

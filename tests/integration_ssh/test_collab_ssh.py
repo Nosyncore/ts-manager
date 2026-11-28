@@ -1,9 +1,14 @@
-"""Colaboração via SSH real contra contêiner ``linux/arm64``.
+"""Manager e colaboração no contêiner ``linux/arm64``.
 
 O Manager roda **dentro** do contêiner como ``tsm-manager`` (Python 3.12 e Git 2.43 do
-Ubuntu 24.04), lê os workspaces escritos pelos agentes Mutagen das contas de dispositivo e
-materializa o shared. A API escuta só em ``127.0.0.1`` do contêiner; um relay ``socat`` de
-teste a expõe no loopback do host.
+Ubuntu 24.04), com a config ``version: 2``. A API escuta só em ``127.0.0.1`` do contêiner;
+um relay ``socat`` de teste a expõe no loopback do host.
+
+A publicação pelo Mutagen sobre SSH, com contas de dispositivo ``tsm-d-…`` criadas na
+aprovação, exige o helper sob ``sudo`` e o sshd com ``AuthorizedKeysFile`` e
+``Match Group``: esses cenários ficam marcados como pulados até a imagem ter essa
+infraestrutura. Aqui ficam o Manager no contêiner, o merge no Git do Ubuntu e o tráfego
+diferencial do transporte (sem Manager).
 """
 
 from __future__ import annotations
@@ -16,14 +21,13 @@ import shutil
 import statistics
 import sys
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass, field
+import urllib.request
 from pathlib import Path
 
 import pytest
 
 from tests.conftest import REPO_ROOT
-from tests.integration.conftest import wait_until, write_config
+from tests.integration.conftest import pc_config, wait_until
 from tests.integration_ssh.conftest import (
     API_PORT,
     DEVS,
@@ -36,170 +40,96 @@ from tests.integration_ssh.conftest import (
 from tsm_client.adapters.mutagen import MutagenAdapter, SubprocessRunner, mutagen_env
 from tsm_client.cli import run as cli_run
 from tsm_client.rules import ProjectRules
-from tsm_manager.auth import token_sha256
 
 pytestmark = [pytest.mark.ssh, pytest.mark.timeout(1800)]
 
 SPELLS = "data/scripts/spells.lua"
-CREATURES = "data/scripts/creatures.lua"
 DEMO = REPO_ROOT / "examples" / "demo-project"
-
-
-TOKENS = {"pca": "ssh-token-pca", "pcb": "ssh-token-pcb", "admin": "ssh-token-admin"}
+CONFIG = "/etc/tsm/manager.json"
+NEEDS_DEVICE_ACCOUNTS = pytest.mark.skip(
+    reason="exige o helper sob sudo e o sshd com AuthorizedKeysFile no contêiner")
 
 
 def manager_config() -> dict:
+    """Manager local no contêiner: sem contas de dispositivo (``provisioner: local``)."""
     return {
-        "version": 1, "root": "/srv/ts", "shared_group": "tsm-readers",
-        "projects": [{"id": "demo", "bindings": [
-            {"id": "demo-pca", "device": "pca", "workspace": "dev-a"},
-            {"id": "demo-pcb", "device": "pcb", "workspace": "dev-b"}]}],
-        "identities": [
-            {"name": "dev-a", "role": "developer", "device": "pca",
-             "token_sha256": token_sha256(TOKENS["pca"])},
-            {"name": "dev-b", "role": "developer", "device": "pcb",
-             "token_sha256": token_sha256(TOKENS["pcb"])},
-            {"name": "admin", "role": "admin", "token_sha256": token_sha256(TOKENS["admin"])},
-        ],
+        "version": 2, "root": "/srv/ts", "shared_group": "tsm-readers",
+        "workspace_group": "tsm-ws", "provisioner": {"mode": "local"},
+        "projects": [{"id": "demo"}],
     }
 
 
-@dataclass
-class SshPc:
-    name: str
-    root: Path
-    cfg_path: Path
-    binding: str
-    data_dir: Path
-    ssh_home: Path
-
-    @property
-    def work(self) -> Path:
-        return self.root / "work"
-
-    def tsm(self, *args: str, expect: int | None = 0) -> tuple[int, str, str]:
-        out, err = io.StringIO(), io.StringIO()
-        code = cli_run(["--config", str(self.cfg_path), *args], out=out, err=err)
-        if expect is not None:
-            assert code == expect, (f"{self.name}: tsm {' '.join(args)} -> {code}\n"
-                                    f"{out.getvalue()}{err.getvalue()}")
-        return code, out.getvalue(), err.getvalue()
-
-    def edit(self, rel: str, old: bytes, new: bytes) -> None:
-        p = self.work / rel
-        data = p.read_bytes()
-        assert old in data
-        p.write_bytes(data.replace(old, new, 1))
-
-    def sessions(self) -> dict[str, dict]:
-        out = self.tsm("status", "--json")[1]
-        return {s["role"]: s for s in json.loads(out)["sessions"]}
+def install_config(c: MgrContainer, data: dict) -> None:
+    c.sh(f"cat > {CONFIG} && chgrp tsm-manager {CONFIG} && chmod 0640 {CONFIG}",
+         input=json.dumps(data))
 
 
-@dataclass
-class SshCollab:
-    c: MgrContainer
-    pcs: dict[str, SshPc] = field(default_factory=dict)
-
-    @property
-    def a(self) -> SshPc:
-        return self.pcs["pcA"]
-
-    @property
-    def b(self) -> SshPc:
-        return self.pcs["pcB"]
+def health(c: MgrContainer) -> dict:
+    with urllib.request.urlopen(f"http://127.0.0.1:{c.api_port}/health", timeout=2) as r:
+        return json.loads(r.read())
 
 
-@pytest.fixture
-def ssh_collab(tmp_path, mgr_container, mutagen_exe, ssh_dir) -> Iterator[SshCollab]:
-    c = mgr_container
-    c.sh("pkill -u tsm-manager -f 'tsm-manager serve' || true")
-    c.setup("restore-host-keys")
-    c.setup("reset")
-    c.sh("cat > /etc/tsm/manager.json && chgrp tsm-manager /etc/tsm/manager.json && "
-         "chmod 0640 /etc/tsm/manager.json", input=json.dumps(manager_config()))
-    c.sh("rm -rf /srv/ts/manager && install -d -o tsm-manager -g tsm-manager -m 0700 "
-         "/srv/ts/manager")
-    c.manager("migrate", "--config", "/etc/tsm/manager.json")
-    c.manager("init-project", "--config", "/etc/tsm/manager.json", "--project", "demo",
-              "--from", "/opt/demo")
-    docker("exec", "-d", "-u", "tsm-manager", c.name, f"{VENV}/tsm-manager", "serve",
-           "--config", "/etc/tsm/manager.json", "--port", str(API_PORT))
-    import urllib.request
-
-    def health() -> bool:
-        with urllib.request.urlopen(f"http://127.0.0.1:{c.api_port}/health", timeout=2) as r:
-            return r.status == 200
-
-    wait_until(health, 120, 0.5, "Manager no contêiner")
-    env = SshCollab(c)
-    for pc_name, (user, _dev, alias) in DEVS.items():
-        device = "pca" if pc_name == "pcA" else "pcb"
-        root = tmp_path / pc_name
-        root.mkdir()
-        home = make_ssh_home(root / "ssh-home", c, ssh_dir, user=user, alias=alias)
-        tok = root / "token"
-        tok.write_text(TOKENS[device], encoding="utf-8")
-        ws_dir = "dev-a" if device == "pca" else "dev-b"
-        cfg = {
-            "version": 2, "device_id": device,
-            "mutagen": {"data_directory": str(root / "mutagen-data"),
-                        "executable": str(mutagen_exe), "ssh_path": str(ssh_dir),
-                        "ssh_home": str(home)},
-            "state_directory": str(root / "state"),
-            "manager": {"url": f"http://127.0.0.1:{c.api_port}", "token_file": str(tok)},
-            "bindings": [{
-                "id": f"demo-{device}", "project_id": "demo",
-                "local": str(root / "work"), "cache": str(root / "cache"),
-                "workspace": f"{alias}:{REMOTE_PROJECT}/workspaces/{ws_dir}",
-                "shared": f"{alias}:{REMOTE_PROJECT}/shared",
-                "rules": {"allow": [], "ignore": []},
-            }],
-        }
-        p = tmp_path / f"{pc_name}.json"
-        p.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-        env.pcs[pc_name] = SshPc(pc_name, root, p, f"demo-{device}", root / "mutagen-data",
-                                 home)
-    yield env
-    for pc in env.pcs.values():
-        pc.tsm("teardown", "--stop-daemon", expect=None)
+def stop_manager(c: MgrContainer) -> None:
     c.sh("pkill -u tsm-manager -f 'tsm-manager serve' || true")
 
 
 # ----------------------------------------------------------------
 
 
-def test_publish_merge_conflict_over_ssh(ssh_collab: SshCollab):
-    env = ssh_collab
-    a, b = env.a, env.b
-    a.tsm("init", "--wait", "300")
-    b.tsm("init", "--wait", "300")
-    # arquivos distintos
-    a.edit(SPELLS, b"mana = 20", b"mana = 21")
-    b.edit(CREATURES, b"health = 20", b"health = 22")
-    assert "publicado: r2" in a.tsm("publish", SPELLS)[1]
-    assert "publicado: r3" in b.tsm("publish", CREATURES)[1]
-    a.tsm("pull", "--wait", "300")
-    b.tsm("pull", "--wait", "300")
-    for pc in (a, b):
-        assert b"mana = 21" in (pc.work / SPELLS).read_bytes()
-        assert b"health = 22" in (pc.work / CREATURES).read_bytes()
-    # mesma linha → bloqueado, pasta intacta, resolução explícita
-    a.edit(SPELLS, b"level = 15", b"level = 16")
-    b.edit(SPELLS, b"level = 15", b"level = 17")
-    a.tsm("publish", SPELLS)
-    before = (b.work / SPELLS).read_bytes()
-    assert "conflito (content)" in b.tsm("publish", SPELLS, expect=4)[2]
-    assert (b.work / SPELLS).read_bytes() == before
-    b.tsm("pull", "--wait", "300", "--resolve", f"{SPELLS}=ours")
-    assert "publicado: r5" in b.tsm("publish", SPELLS)[1]
-    a.tsm("pull", "--wait", "300")
-    assert b"level = 17" in (a.work / SPELLS).read_bytes()
-    out = env.c.manager("verify", "--config", "/etc/tsm/manager.json")
-    assert "verify: ok" in out.stdout
-    # o Manager roda no Python do sistema do Ubuntu 24.04 arm64
-    assert env.c.sh(f"{VENV}/python -c 'import sys; print(sys.version_info[:2])'"
+def test_manager_v2_in_container(mgr_container):
+    """``migrate``, ``init-project`` e ``serve`` como ``tsm-manager``, com os grupos reais."""
+    c = mgr_container
+    stop_manager(c)
+    c.setup("reset")
+    shared = f"{REMOTE_PROJECT}/shared"
+    c.sh(f"find {shared} -mindepth 1 -delete")  # o shared nasce da materialização do r1
+    c.sh("rm -rf /srv/ts/manager && install -d -o tsm-manager -g tsm-manager -m 0700 "
+         "/srv/ts/manager")
+    # a config da identidade de teste é recusada, com a orientação de migração
+    install_config(c, {"version": 1, "root": "/srv/ts", "identities": [],
+                       "projects": [{"id": "demo", "bindings": []}]})
+    old = c.manager("migrate", "--config", CONFIG, check=False)
+    assert old.returncode == 2 and "não é mais aceita" in old.stderr, old.stderr
+    install_config(c, manager_config())
+    groups = c.sh("id -nG tsm-manager").stdout.split()
+    assert {"tsm-readers", "tsm-ws"} <= set(groups), groups
+    c.manager("migrate", "--config", CONFIG)
+    c.manager("init-project", "--config", CONFIG, "--project", "demo", "--from", "/opt/demo")
+    docker("exec", "-d", "-u", "tsm-manager", c.name, f"{VENV}/tsm-manager", "serve",
+           "--config", CONFIG, "--port", str(API_PORT))
+    try:
+        wait_until(lambda: health(c)["ok"] is True, 120, 0.5, "Manager no contêiner")
+        assert health(c)["server_id"]
+        stat = c.sh(f"cd {shared} && find . -mindepth 1 -exec stat -c '%a %U %G %n' {{}} +"
+                    ).stdout.splitlines()
+        entries = {line.split(" ", 3)[3]: line.split(" ", 3)[:3] for line in stat}
+        assert "./.tsm/revision.json" in entries and f"./{SPELLS}" in entries
+        for path, (mode, owner, group) in entries.items():
+            assert owner == "tsm-manager" and group == "tsm-readers", (path, owner, group)
+            is_dir = c.sh(f"test -d '{shared}/{path}' && echo d || echo f").stdout.strip()
+            assert mode == ("2750" if is_dir == "d" else "640"), (path, mode)
+        r = c.sh(f"touch {shared}/intruso 2>&1; echo rc=$?", user="tsm-dev-a", check=False)
+        assert "rc=0" not in r.stdout  # dispositivo não escreve no shared
+        assert "verify: ok" in c.manager("verify", "--config", CONFIG).stdout
+        assert c.sh(f"{VENV}/python -c 'import sys; print(sys.version_info[:2])'"
                     ).stdout.strip() == "(3, 12)"
+    finally:
+        stop_manager(c)
+
+
+@NEEDS_DEVICE_ACCOUNTS
+def test_publish_merge_conflict_over_ssh():
+    """Dois dispositivos aprovados publicam pelo Mutagen sobre SSH: arquivos distintos
+    mesclam, a mesma linha bloqueia sem tocar a pasta e a resolução explícita publica."""
+
+
+@NEEDS_DEVICE_ACCOUNTS
+def test_shared_permissions_and_no_halt():
+    """Exclusão em massa confirmada, shared ``tsm-manager:tsm-readers`` (``2750``/``0640``)
+    escrito pelo Manager e nenhuma sessão de download parada por salvaguarda."""
+
+
+# ----------------------------------------------------------------
 
 
 def test_merge_tree_on_container_git(mgr_container):
@@ -246,42 +176,6 @@ print(n == 0 and merged == crlf.replace(b"a = 1", b"a = 10").replace(b"d = 4", b
 # ----------------------------------------------------------------
 
 
-def test_shared_permissions_and_no_halt(ssh_collab: SshCollab):
-    env = ssh_collab
-    a, b = env.a, env.b
-    a.tsm("init", "--wait", "300")
-    b.tsm("init", "--wait", "300")
-    (a.work / "data" / "new").mkdir(parents=True)
-    (a.work / "data" / "new" / "x.lua").write_bytes(b"return 'x'\n")
-    for rel in ("README.md", SPELLS, CREATURES):
-        (a.work / rel).unlink()
-    a.tsm("publish", "--all", expect=3)  # 3 de 4 arquivos: exclusão em massa
-    assert "publicado: r2" in a.tsm("publish", "--all", "--confirm-deletions")[1]
-    shared = f"{REMOTE_PROJECT}/shared"
-    stat = env.c.sh(f"cd {shared} && find . -mindepth 1 -exec stat -c '%a %U %G %n' {{}} +"
-                    ).stdout.splitlines()
-    entries = {line.split(" ", 3)[3]: line.split(" ", 3)[:3] for line in stat}
-    for path, (mode, owner, group) in entries.items():
-        assert owner == "tsm-manager" and group == "tsm-readers", (path, owner, group)
-        is_dir = env.c.sh(f"test -d '{shared}/{path}' && echo d || echo f").stdout.strip()
-        assert mode == ("2750" if is_dir == "d" else "640"), (path, mode)
-    assert "./.tsm/revision.json" in entries and "./data/new/x.lua" in entries
-    assert "./data/scripts/spells.lua" not in entries
-    # o dev continua sem escrever no shared
-    r = env.c.sh(f"touch {shared}/intruso 2>&1; echo rc=$?", user="tsm-dev-a", check=False)
-    assert "rc=0" not in r.stdout
-    # nenhuma sessão de download parou por salvaguarda; B converge
-    b.tsm("pull", "--wait", "300", "--confirm-deletions")
-    assert not (b.work / SPELLS).exists() and (b.work / "data/new/x.lua").exists()
-    for pc in (a, b):
-        sessions = pc.sessions()
-        assert not sessions["download"]["status"].startswith("halted"), sessions["download"]
-    assert "verify: ok" in env.c.manager("verify", "--config", "/etc/tsm/manager.json").stdout
-
-
-# ----------------------------------------------------------------
-
-
 def _counter_config(alias: str, user: str, port: int, key_name: str, counts: Path) -> str:
     proxy = Path(REPO_ROOT / "tests" / "fixtures" / "traffic" / "count_proxy.py").as_posix()
     python = Path(sys.executable).as_posix()
@@ -303,8 +197,16 @@ def _counter_config(alias: str, user: str, port: int, key_name: str, counts: Pat
 
 
 def _total(counts: Path) -> int:
-    data = json.loads(counts.read_text("utf-8"))
-    return int(data["sent"]) + int(data["received"])
+    # o proxy troca o arquivo com os.replace; no Windows a leitura pode cair na troca
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            data = json.loads(counts.read_text("utf-8"))
+            return int(data["sent"]) + int(data["received"])
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _stable_total(counts: Path, quiet: float = 1.5, timeout: float = 120) -> int:
@@ -322,7 +224,7 @@ def _stable_total(counts: Path, quiet: float = 1.5, timeout: float = 120) -> int
 
 def test_differential_traffic(tmp_path, mgr_container, mutagen_exe, ssh_dir):
     c = mgr_container
-    c.sh("pkill -u tsm-manager -f 'tsm-manager serve' || true")
+    stop_manager(c)
     c.setup("restore-host-keys")
     c.setup("reset")
     user, dev, alias = DEVS["pcA"]
@@ -334,12 +236,11 @@ def test_differential_traffic(tmp_path, mgr_container, mutagen_exe, ssh_dir):
     key_name = f"id_ed25519_{user.replace('-', '_')}"
     with open(home / ".ssh" / "config", "a", encoding="utf-8") as fh:
         fh.write("\n" + _counter_config("tsm-traffic-a", user, c.port, key_name, counts))
-    cfg_path = tmp_path / "pcA.json"
     # upload pelo alias contado; download pelo alias normal (fora da contagem)
-    write_config(root, cfg_path, exe=mutagen_exe, binding="demo-pca",
-                 workspace=f"tsm-traffic-a:{REMOTE_PROJECT}/workspaces/{dev}",
-                 shared=f"{alias}:{REMOTE_PROJECT}/shared", rules=ProjectRules(),
-                 ssh_path=ssh_dir, ssh_home=home)
+    cfg = pc_config(root, exe=mutagen_exe, binding="demo-pca",
+                    workspace=f"tsm-traffic-a:{REMOTE_PROJECT}/workspaces/{dev}",
+                    shared=f"{alias}:{REMOTE_PROJECT}/shared", rules=ProjectRules(),
+                    ssh_path=ssh_dir, ssh_home=home)
     rng = random.Random(20261126)
     size = 50 * 1024 * 1024
     big = work / "data" / "big.bin"
@@ -347,7 +248,7 @@ def test_differential_traffic(tmp_path, mgr_container, mutagen_exe, ssh_dir):
 
     def tsm(*args: str) -> str:
         out, err = io.StringIO(), io.StringIO()
-        code = cli_run(["--config", str(cfg_path), *args], out=out, err=err)
+        code = cli_run(list(args), config=cfg, out=out, err=err)
         assert code == 0, out.getvalue() + err.getvalue()
         return out.getvalue()
 
@@ -411,6 +312,5 @@ def test_differential_traffic(tmp_path, mgr_container, mutagen_exe, ssh_dir):
         assert summary["T1a"]["median"] < summary["T1d"]["median"]
     finally:
         tsm_out = io.StringIO()
-        cli_run(["--config", str(cfg_path), "teardown", "--stop-daemon"], out=tsm_out,
-                err=tsm_out)
+        cli_run(["teardown", "--stop-daemon"], config=cfg, out=tsm_out, err=tsm_out)
         adapter.daemon_stop()

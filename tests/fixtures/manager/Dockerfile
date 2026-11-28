@@ -1,5 +1,7 @@
 # Manager dentro do alvo SSH de teste (linux/arm64), rodando como tsm-manager.
 # Contexto de build montado pelo teste: common/ e server/ do repositório + este arquivo.
+# O Manager fica em tsm-readers (shared) e tsm-ws (conteúdo dos workspaces): o serve recusa
+# subir sem os dois grupos.
 ARG BASE=tsm-sshd-test:arm64
 FROM ${BASE}
 
@@ -7,7 +9,8 @@ RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
       python3 python3-venv git socat ca-certificates \
  && rm -rf /var/lib/apt/lists/* \
- && usermod -aG tsm-readers tsm-manager
+ && groupadd tsm-ws \
+ && usermod -aG tsm-readers,tsm-ws tsm-manager
 
 COPY common /opt/tsm-src/common
 COPY server /opt/tsm-src/server

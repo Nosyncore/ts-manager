@@ -1,24 +1,13 @@
-"""SU1, SU3, SU5 e parsing do merge-tree: unitários do Manager, sem Git."""
+"""SU1, SU3 e parsing do merge-tree: unitários do Manager, sem Git."""
 
 from __future__ import annotations
-
-import json
 
 import pytest
 
 from tsm_common.rules import ProjectRules, rules_digest
 from tsm_manager.adapters.git import is_binary
-from tsm_manager.auth import authenticate, can_read, owns_binding, token_sha256
-from tsm_manager.bindings import ConfigBindings
 from tsm_manager.cli import is_loopback
-from tsm_manager.config import (
-    BindingConfig,
-    Identity,
-    Limits,
-    ManagerConfigError,
-    ProjectConfig,
-    load_manager_config,
-)
+from tsm_manager.config import Limits, ProjectConfig
 from tsm_manager.validation import (
     RequestError,
     check_project_file,
@@ -30,8 +19,7 @@ H = "a" * 64
 
 
 def _project(**kw) -> ProjectConfig:
-    return ProjectConfig("demo", kw.get("rules", ProjectRules()), kw.get("limits", Limits()),
-                         {"demo-pca": BindingConfig("demo-pca", "pca", "pca")})
+    return ProjectConfig("demo", kw.get("rules", ProjectRules()), kw.get("limits", Limits()))
 
 
 def _req(changes, **kw):
@@ -101,50 +89,7 @@ def test_check_project_file():
     assert check_project_file(b'{"project_id": "x"}', "demo")
 
 
-# ---------------------------------------------------------------- SU3 auth
-
-
-def _cfg(tmp_path, identities=None, **top):
-    data = {
-        "version": 1, "root": "srv",
-        "projects": [{"id": "demo", "bindings": [
-            {"id": "demo-pca", "device": "pca", "workspace": "pca"},
-            {"id": "demo-pcb", "device": "pcb", "workspace": "pcb"}]}],
-        "identities": identities if identities is not None else [
-            {"name": "dev-a", "role": "developer", "device": "pca",
-             "token_sha256": token_sha256("tok-a")},
-            {"name": "admin", "role": "admin", "token_sha256": token_sha256("tok-admin")},
-            {"name": "intruso", "role": "developer", "device": "pcx",
-             "token_sha256": token_sha256("tok-x")},
-        ],
-        **top,
-    }
-    p = tmp_path / "manager.json"
-    p.write_text(json.dumps(data), encoding="utf-8")
-    return load_manager_config(p)
-
-
-def test_authenticate(tmp_path):
-    cfg = _cfg(tmp_path)
-    assert authenticate(cfg, "Bearer tok-a").name == "dev-a"
-    assert authenticate(cfg, "Bearer tok-admin").is_admin
-    for bad in (None, "", "tok-a", "Bearer ", "Bearer errado", "Basic tok-a"):
-        assert authenticate(cfg, bad) is None
-
-
-def test_authorization(tmp_path):
-    cfg = _cfg(tmp_path)
-    project = cfg.projects["demo"]
-    bindings = ConfigBindings(project)
-    a = authenticate(cfg, "Bearer tok-a")
-    x = authenticate(cfg, "Bearer tok-x")
-    admin = authenticate(cfg, "Bearer tok-admin")
-    assert can_read(a, bindings) and can_read(admin, bindings) and not can_read(x, bindings)
-    assert bindings.for_device("pca").id == "demo-pca" and bindings.for_device("pcx") is None
-    assert bindings.get("demo-pcb").device == "pcb" and bindings.get("nope") is None
-    assert owns_binding(a, project.bindings["demo-pca"])
-    assert not owns_binding(a, project.bindings["demo-pcb"])
-    assert not owns_binding(admin, project.bindings["demo-pca"])
+# ---------------------------------------------------------------- SU3
 
 
 def test_loopback_only():
@@ -152,78 +97,8 @@ def test_loopback_only():
     assert not is_loopback("0.0.0.0") and not is_loopback("192.168.0.10")
 
 
-# ---------------------------------------------------------------- SU5 config
-
-
-def test_config_ok(tmp_path):
-    cfg = _cfg(tmp_path)
-    assert cfg.root == (tmp_path / "srv").resolve()
-    assert cfg.projects["demo"].limits == Limits()
-    assert set(cfg.projects["demo"].bindings) == {"demo-pca", "demo-pcb"}
-    assert cfg.database == cfg.root / "manager" / "manager.db"
-    assert cfg.backups == cfg.root / "manager" / "backups"
-
-
-def _cfg_with_database(tmp_path, database):
-    data = {"version": 1, "root": "srv", "database": database,
-            "projects": [{"id": "demo", "bindings": []}], "identities": []}
-    p = tmp_path / "m.json"
-    p.write_text(json.dumps(data), encoding="utf-8")
-    return load_manager_config(p)
-
-
-def test_config_database_under_root(tmp_path):
-    root = (tmp_path / "srv").resolve()
-    assert _cfg_with_database(tmp_path, "db/x.db").database == root / "db" / "x.db"
-    assert _cfg_with_database(tmp_path, str(root / "y.db")).database == root / "y.db"
-
-
-@pytest.mark.parametrize("database", ["../fora.db", "", ".", "manager/../../fora.db", 7])
-def test_config_database_outside_root_rejected(tmp_path, database):
-    with pytest.raises(ManagerConfigError, match="database"):
-        _cfg_with_database(tmp_path, database)
-
-
-def test_config_database_absolute_outside_root_rejected(tmp_path):
-    with pytest.raises(ManagerConfigError, match="fora de root"):
-        _cfg_with_database(tmp_path, str((tmp_path / "outro" / "m.db").resolve()))
-
-
-@pytest.mark.parametrize("mutate", [
-    lambda d: d.update(version=2),
-    lambda d: d.update(extra=1),
-    lambda d: d["projects"][0].update(id="Demo"),
-    lambda d: d["projects"][0]["bindings"].append(
-        {"id": "demo-pcc", "device": "pca", "workspace": "pcc"}),
-    lambda d: d["projects"][0]["bindings"].append(
-        {"id": "demo-pcc", "device": "pcc", "workspace": "pca"}),
-    lambda d: d["projects"][0].update(limits={"max_files": 0}),
-    lambda d: d["projects"][0].update(rules={"ignore": ["a,b"]}),
-    lambda d: d["identities"].append({"name": "x", "role": "root", "token_sha256": "0" * 64}),
-    lambda d: d["identities"].append({"name": "x", "role": "admin", "token_sha256": "xyz"}),
-    lambda d: d.update(test_faults="sim"),
-])
-def test_config_invalid(tmp_path, mutate):
-    data = {
-        "version": 1, "root": "srv",
-        "projects": [{"id": "demo", "bindings": [
-            {"id": "demo-pca", "device": "pca", "workspace": "pca"}]}],
-        "identities": [{"name": "a", "role": "developer", "device": "pca",
-                        "token_sha256": "1" * 64}],
-    }
-    mutate(data)
-    p = tmp_path / "m.json"
-    p.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ManagerConfigError):
-        load_manager_config(p)
-
-
 def test_is_binary_heuristic():
     assert is_binary(b"a\0b")
     assert not is_binary(b"texto\r\n")
     assert not is_binary(b"x" * 9000 + b"\0")
 
-
-def test_identity_admin_flag():
-    assert Identity("a", "admin", None, H).is_admin
-    assert not Identity("a", "developer", "pca", H).is_admin

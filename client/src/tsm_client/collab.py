@@ -71,23 +71,12 @@ class PullReport:
     warning: str | None = None
 
 
-def read_token(cfg: Config) -> str:
-    assert cfg.manager is not None
-    try:
-        token = cfg.manager.token_file.read_text(encoding="utf-8").strip()
-    except FileNotFoundError as exc:
-        raise ConfigError(f"token do Manager ausente: {cfg.manager.token_file}") from exc
-    if not token:
-        raise ConfigError(f"token do Manager vazio: {cfg.manager.token_file}")
-    return token
-
-
 class CollabService:
     def __init__(self, cfg: Config, transport: TransportService, manager: ManagerClient,
                  git: ClientGit, state: StateStore, *, faults: dict[str, Any] | None = None
                  ) -> None:
         if not cfg.collab_enabled:
-            raise ConfigError("colaboração exige config version 2 (state_directory e manager)")
+            raise ConfigError("colaboração exige o diretório do tsm (tsm enroll)")
         self.cfg = cfg
         self.transport = transport
         self.manager = manager

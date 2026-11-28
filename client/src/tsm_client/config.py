@@ -1,38 +1,7 @@
-"""Configuração da PoC (por dispositivo, fora do repositório) e validação de ``ts-project.json``.
+"""Configuração do Client e validação de ``ts-project.json``.
 
-Formato (JSON)::
-
-    {
-      "version": 1,
-      "device_id": "pca",
-      "mutagen": {
-        "data_directory": "pcA/mutagen-data",      # obrigatório: daemon isolado
-        "executable": "...mutagen.exe",            # opcional: padrão = .tools fixado
-        "ssh_path": "C:/Program Files/Git/usr/bin", # opcional: MUTAGEN_SSH_PATH
-        "ssh_home": "ssh-home"                     # opcional: HOME gerenciado (config SSH)
-      },
-      "bindings": [{
-        "id": "demo-pca", "project_id": "demo",
-        "local": "...", "cache": "...",            # sempre locais
-        "workspace": "alias:/srv/...", "shared": "alias:/srv/...",  # locais ou remotos
-        "rules": {"allow": ["data/"], "ignore": ["*.bak"]}
-      }]
-    }
-
-Na ``version: 2`` entram ``state_directory`` (estado local por vínculo: base,
-armazenamento de conteúdo e lock) e ``manager`` (``url`` + ``token_file`` da
-identidade de teste), além de ``git`` (opcional, executável do Git)::
-
-    "state_directory": "pcA/state",
-    "manager": {"url": "http://127.0.0.1:8740", "token_file": "pcA/manager-token"},
-    "git": "C:/Program Files/Git/cmd/git.exe"
-
-Configs ``version: 1`` continuam válidas para os comandos de transporte.
-
-Caminhos locais relativos são resolvidos a partir do diretório do arquivo de config.
-
-A ``version: 3`` mora no diretório do Client (``<home>/config.json``, ``tsm_client.home``) e
-é escrita só pelo ``tsm`` (``enroll`` e ``bind``)::
+A config mora no diretório do Client (``<home>/config.json``, ``tsm_client.home``), na
+``version: 3``, e é escrita só pelo ``tsm`` (``enroll`` e ``bind``)::
 
     {"version": 3,
      "manager": {"url": "http://127.0.0.1:8740", "server_id": "<uuid>", "ca_file": null},
@@ -44,8 +13,11 @@ A ``version: 3`` mora no diretório do Client (``<home>/config.json``, ``tsm_cli
 
 Workspace, shared, alias SSH, regras e grupo do workspace de cada vínculo vêm da última
 ``/connection/config`` (``<home>/state/connections/<vínculo>.json``); o daemon, o HOME do
-ssh e o estado ficam em caminhos fixos do ``<home>``. As ``version: 1`` e ``2`` só são
-lidas por ``--config`` e a ``version: 3`` só pelo ``<home>``.
+ssh e o estado ficam em caminhos fixos do ``<home>``. As configs ``version: 1`` e ``2``
+(identidade de teste) são recusadas com uma mensagem de migração.
+
+``load_home_config`` devolve o ``Config`` em memória que ``TransportService`` e
+``CollabService`` usam.
 """
 
 from __future__ import annotations
@@ -62,22 +34,15 @@ from tsm_client.adapters.manager import ManagerUrlError, check_url
 from tsm_client.adapters.sshkeygen import default_ssh_path
 from tsm_client.errors import RefusedError
 from tsm_client.home import HOME_CONFIG_VERSION, Home, HomeError
-from tsm_client.paths import Endpoint, PathError, canonical_local, endpoints_overlap, parse_endpoint
-from tsm_client.rules import PROJECT_FILE, ProjectRules, RulesError
-from tsm_client.sessions import Binding, SessionRuleError
+from tsm_client.paths import Endpoint, PathError, canonical_local, endpoints_overlap
+from tsm_client.rules import PROJECT_FILE
+from tsm_client.sessions import Binding
 from tsm_client.sshconfig import Connection, parse_connection
 from tsm_common.fsutil import LockTimeout, atomic_write_json, file_lock
 from tsm_common.sshkeys import is_fingerprint
 
-CONFIG_VERSIONS = (1, 2)
 PROJECT_FILE_VERSION = 1
-
-_TOP_FIELDS = {"version", "device_id", "mutagen", "bindings"}
-_TOP_FIELDS_V2 = _TOP_FIELDS | {"state_directory", "manager", "git"}
-_MANAGER_FIELDS = {"url", "token_file"}
-_MUTAGEN_FIELDS = {"data_directory", "executable", "ssh_path", "ssh_home"}
-_BINDING_FIELDS = {"id", "project_id", "local", "cache", "workspace", "shared", "rules"}
-_BINDING_REQUIRED = _BINDING_FIELDS - {"rules"}
+OLD_VERSIONS = (1, 2)
 
 
 class ConfigError(ValueError):
@@ -95,8 +60,7 @@ class MutagenSettings:
 @dataclass(frozen=True)
 class ManagerSettings:
     url: str
-    token_file: Path | None  # só na version 2 (identidade de teste)
-    server_id: str | None = None
+    server_id: str
     ca_file: Path | None = None
 
 
@@ -106,7 +70,6 @@ class Config:
     device_id: str
     mutagen: MutagenSettings
     bindings: tuple[Binding, ...]
-    version: int = 1
     state_directory: Path | None = None
     manager: ManagerSettings | None = None
     git: str | None = None
@@ -137,119 +100,6 @@ def _str(obj: Mapping[str, Any], key: str, where: str) -> str:
     return value
 
 
-def _resolve_local(raw: str, base: Path) -> str:
-    p = raw if os.path.isabs(raw) or raw.startswith(("\\\\", "//")) else str(base / raw)
-    return canonical_local(p)
-
-
-def _parse_endpoint_field(obj: Mapping[str, Any], key: str, base: Path, where: str) -> Endpoint:
-    raw = _str(obj, key, where)
-    try:
-        if ":" not in raw and not raw.startswith(("\\", "/")):
-            # caminho local relativo ao arquivo de config
-            return Endpoint(None, _resolve_local(raw, base))
-        return parse_endpoint(raw)
-    except PathError as exc:
-        raise ConfigError(f"{where}.{key}: {exc}") from exc
-
-
-def _optional_path(obj: Mapping[str, Any], key: str, base: Path) -> Path | None:
-    if obj.get(key) in (None, ""):
-        return None
-    try:
-        return Path(_resolve_local(_str(obj, key, "mutagen"), base))
-    except PathError as exc:
-        raise ConfigError(f"mutagen.{key}: {exc}") from exc
-
-
-def load_config(path: str | os.PathLike[str]) -> Config:
-    cfg_path = Path(path)
-    try:
-        text = cfg_path.read_text(encoding="utf-8")
-    except FileNotFoundError as exc:
-        raise ConfigError(f"arquivo de configuração não encontrado: {cfg_path}") from exc
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"{cfg_path}: JSON inválido: {exc}") from exc
-
-    base = cfg_path.resolve().parent
-    version = data.get("version") if isinstance(data, dict) else None
-    if version not in CONFIG_VERSIONS:
-        raise ConfigError(f"config.version: suportadas {', '.join(map(str, CONFIG_VERSIONS))}")
-    if version == 1:
-        top = _check_fields(data, "config", _TOP_FIELDS, _TOP_FIELDS)
-    else:
-        top = _check_fields(data, "config", _TOP_FIELDS_V2,
-                            _TOP_FIELDS | {"state_directory", "manager"})
-    device_id = _str(top, "device_id", "config")
-
-    m = _check_fields(top["mutagen"], "mutagen", _MUTAGEN_FIELDS, {"data_directory"})
-    data_dir = _optional_path(m, "data_directory", base)
-    assert data_dir is not None
-    settings = MutagenSettings(
-        data_directory=data_dir,
-        executable=_optional_path(m, "executable", base),
-        ssh_path=_optional_path(m, "ssh_path", base),
-        ssh_home=_optional_path(m, "ssh_home", base),
-    )
-
-    raw_bindings = top["bindings"]
-    if not isinstance(raw_bindings, list) or not raw_bindings:
-        raise ConfigError("config.bindings: esperada uma lista não vazia")
-    bindings: list[Binding] = []
-    for i, rb in enumerate(raw_bindings):
-        where = f"bindings[{i}]"
-        b = _check_fields(rb, where, _BINDING_FIELDS, _BINDING_REQUIRED)
-        try:
-            rules = ProjectRules.from_dict(b.get("rules"))
-        except RulesError as exc:
-            raise ConfigError(f"{where}.rules: {exc}") from exc
-        try:
-            bindings.append(
-                Binding(
-                    id=_str(b, "id", where),
-                    project_id=_str(b, "project_id", where),
-                    local=_parse_endpoint_field(b, "local", base, where),
-                    cache=_parse_endpoint_field(b, "cache", base, where),
-                    workspace=_parse_endpoint_field(b, "workspace", base, where),
-                    shared=_parse_endpoint_field(b, "shared", base, where),
-                    rules=rules,
-                )
-            )
-        except SessionRuleError as exc:
-            raise ConfigError(f"{where}: {exc}") from exc
-
-    ids = [b.id for b in bindings]
-    if len(set(ids)) != len(ids):
-        raise ConfigError(f"config.bindings: id duplicado em {ids}")
-
-    state_dir: Path | None = None
-    manager: ManagerSettings | None = None
-    git: str | None = None
-    if version == 2:
-        try:
-            state_dir = Path(_resolve_local(_str(top, "state_directory", "config"), base))
-        except PathError as exc:
-            raise ConfigError(f"config.state_directory: {exc}") from exc
-        mg = _check_fields(top["manager"], "manager", _MANAGER_FIELDS, _MANAGER_FIELDS)
-        url = _str(mg, "url", "manager").rstrip("/")
-        if not url.startswith(("http://", "https://")):
-            raise ConfigError("manager.url: use http:// ou https://")
-        try:
-            token_file = Path(_resolve_local(_str(mg, "token_file", "manager"), base))
-        except PathError as exc:
-            raise ConfigError(f"manager.token_file: {exc}") from exc
-        manager = ManagerSettings(url, token_file)
-        if top.get("git") not in (None, ""):
-            git = _str(top, "git", "config")
-
-    check_own_dirs(settings, state_dir, bindings)
-    return Config(path=cfg_path.resolve(), device_id=device_id, mutagen=settings,
-                  bindings=tuple(bindings), version=version, state_directory=state_dir,
-                  manager=manager, git=git)
-
-
 def check_own_dirs(settings: MutagenSettings, state_dir: Path | None,
                     bindings: list[Binding]) -> None:
     own_dirs = [("mutagen.data_directory", settings.data_directory),
@@ -266,7 +116,7 @@ def check_own_dirs(settings: MutagenSettings, state_dir: Path | None,
                     )
 
 
-# ---------------------------------------------------------------- version 3 (<home>)
+# ---------------------------------------------------------------- <home>/config.json
 
 _V3_TOP = {"version", "manager", "device", "mutagen", "git", "bindings"}
 _V3_MANAGER = {"url", "server_id", "ca_file"}
@@ -318,6 +168,11 @@ class HomeConfig:
 
     @classmethod
     def from_dict(cls, data: Any) -> HomeConfig:
+        version = data.get("version") if isinstance(data, dict) else None
+        if version in OLD_VERSIONS and not isinstance(version, bool):
+            raise ConfigError(f"config version {version} (identidade de teste) não é mais "
+                              "aceita: cadastre este dispositivo com 'tsm enroll' (use outro "
+                              "--home)")
         top = _check_fields(data, "config", _V3_TOP, _V3_TOP - {"git"})
         if top["version"] != HOME_CONFIG_VERSION:
             raise ConfigError(f"config.version: esperada {HOME_CONFIG_VERSION}")
@@ -426,12 +281,11 @@ def load_home_config(home: Home) -> Config:
             raise ConfigError(str(exc)) from exc
         bindings.append(read_connection(home, hc, hb).binding(hb.local, hb.cache))
     check_own_dirs(settings, home.state, bindings)
-    manager = ManagerSettings(hc.manager_url, None, hc.server_id,
+    manager = ManagerSettings(hc.manager_url, hc.server_id,
                               Path(hc.ca_file) if hc.ca_file else None)
     return Config(path=home.config_path, device_id=hc.device_id, mutagen=settings,
-                  bindings=tuple(bindings), version=HOME_CONFIG_VERSION,
-                  state_directory=home.state, manager=manager, git=hc.git, home=home,
-                  fingerprint=hc.fingerprint)
+                  bindings=tuple(bindings), state_directory=home.state, manager=manager,
+                  git=hc.git, home=home, fingerprint=hc.fingerprint)
 
 
 def verify_project_folder(binding: Binding) -> None:

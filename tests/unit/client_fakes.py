@@ -124,3 +124,19 @@ class ScriptedTransport:
 
     def paths(self) -> list[str]:
         return [f"{r['method']} {r['path']}" for r in self.requests]
+
+
+class HeaderAuth:
+    """``Auth`` de teste: um cabeçalho fixo, sem repetição (o papel da sessão já obtida)."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def header(self, client) -> str:
+        return f"Bearer {self.token}"
+
+    def retry(self, client, resp) -> bool:
+        return False
+
+    def check(self, client, resp) -> None:
+        return None

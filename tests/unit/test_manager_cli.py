@@ -16,8 +16,9 @@ from tsm_manager.db.migrate import packaged_migrations
 def cfg(tmp_path):
     p = tmp_path / "manager.json"
     p.write_text(json.dumps({
-        "version": 1, "root": "srv",
-        "projects": [{"id": "demo", "bindings": []}], "identities": [],
+        "version": 2, "root": "srv", "shared_group": "tsm-readers",
+        "workspace_group": "tsm-ws", "provisioner": {"mode": "local"},
+        "projects": [{"id": "demo"}],
     }), encoding="utf-8")
     return p
 
@@ -97,9 +98,26 @@ def test_commands_with_current_database(cfg):
     assert code == EXIT_CONFIG and "loopback" in err
 
 
-def test_invalid_config_and_token(tmp_path):
+def test_invalid_config(tmp_path):
     bad = tmp_path / "bad.json"
     bad.write_text("{", encoding="utf-8")
     assert tsm_manager("migrate", "--config", str(bad))[0] == EXIT_CONFIG
-    code, out, _ = tsm_manager("token", "--quiet")
-    assert code == EXIT_OK and len(out.strip()) >= 40
+
+
+@pytest.mark.parametrize("command", [["migrate"], ["serve"], ["verify"], ["requests", "list"]])
+def test_version_1_config_is_refused_with_migration_message(tmp_path, command):
+    old = tmp_path / "old.json"
+    old.write_text(json.dumps({
+        "version": 1, "root": "srv", "projects": [{"id": "demo", "bindings": []}],
+        "identities": []}), encoding="utf-8")
+    code, _, err = tsm_manager(command[0], *command[1:], "--config", str(old))
+    assert code == EXIT_CONFIG
+    assert "version 1" in err and "não é mais aceita" in err and "bootstrap-admin" in err
+    assert not (tmp_path / "srv").exists()
+
+
+def test_token_command_no_longer_exists(capsys):
+    with pytest.raises(SystemExit) as exc:
+        tsm_manager("token", "--quiet")
+    assert exc.value.code == EXIT_CONFIG
+    assert "token" in capsys.readouterr().err

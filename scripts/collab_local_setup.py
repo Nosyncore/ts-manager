@@ -1,88 +1,127 @@
-"""Cria o ambiente da demo de colaboração: Manager local + dois "PCs".
+"""Cria o ambiente da demo local: Manager com identidade real + admin e dois "PCs".
 
 Layout (em ``--root``, padrão ``.collab``)::
 
-    manager.json                    config do Manager (identidades de teste)
+    manager.json                    config do Manager (version 2, provisionador local)
     srv/manager/manager.db          banco do Manager (criado por tsm-manager migrate)
     srv/projects/demo/...           workspaces, shared e history (Git interno)
-    pcA.json  pcA/{token, ...}      Client do dev A (config version 2)
-    pcB.json  pcB/{token, ...}      Client do dev B
-    admin.json  admin-token         identidade admin (rollback, auditoria)
+    admin/home                      diretório do tsm do admin (bootstrap)
+    pcA/home  pcB/home              diretórios do tsm dos devs A e B
 
-O banco é criado com ``tsm-manager migrate`` e o projeto, inicializado com
-``tsm-manager init-project`` a partir de ``examples/demo-project`` (revisão r1). As
-pastas de trabalho não existem: cada PC as cria com ``tsm init``. Os tokens são gerados
-aqui e só valem para esta demo local.
+O script cria o banco (``migrate``), inicializa o projeto a partir de
+``examples/demo-project`` (revisão r1) e sobe o Manager só durante o cadastro:
 
-``--reset`` apaga um ambiente criado antes por este script (identificado por marcador).
+1. ``tsm-manager bootstrap-admin`` → ``tsm enroll`` do admin → ``tsm-manager requests
+   approve`` com o fingerprint mostrado pelo ``enroll``;
+2. para A e B: ``tsm admin invite create`` (pelo admin) → ``tsm enroll`` do dev →
+   ``tsm admin requests approve`` com o fingerprint.
+
+Cada dispositivo tem a própria chave Ed25519 no seu ``home``. As pastas de trabalho não
+existem: cada PC as cria com ``tsm bind`` (vínculo + ``init``), com o Manager no ar.
+
+``--reset`` apaga um ambiente criado antes por este script (identificado por marcador),
+depois de encerrar as sessões do Mutagen de cada ``home``.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import secrets
+import os
 import shutil
+import stat
 import subprocess
 import sys
+import time
+import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEMO = REPO_ROOT / "examples" / "demo-project"
 MARKER = ".tsm-collab-root"
 PORT = 8740
+PCS = ("admin", "pcA", "pcB")
 
 
-def _sha(token: str) -> str:
-    import hashlib
+def manager(root: Path, *args: str) -> str:
+    r = subprocess.run([sys.executable, "-m", "tsm_manager", *args, "--config",
+                        str(root / "manager.json")], capture_output=True, text=True,
+                       encoding="utf-8")
+    if r.returncode != 0:
+        raise SystemExit(f"tsm-manager {args[0]} falhou ({r.returncode}):\n{r.stderr}")
+    return r.stdout
 
-    return hashlib.sha256(token.encode()).hexdigest()
+
+def tsm(root: Path, pc: str, *args: str) -> str:
+    r = subprocess.run([sys.executable, "-m", "tsm_client", "--home",
+                        str(root / pc / "home"), *args], capture_output=True, text=True,
+                       encoding="utf-8")
+    if r.returncode != 0:
+        raise SystemExit(f"tsm ({pc}) {args[0]} falhou ({r.returncode}):\n{r.stderr}")
+    return r.stdout
+
+
+def remove_tree(root: Path) -> None:
+    """Apaga o ambiente; os objetos do Git interno são somente leitura no Windows."""
+    def retry(func, path, _exc):
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    shutil.rmtree(root, onexc=retry)
+
+
+def wait_health(url: str, proc: subprocess.Popen, timeout: float = 60) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            raise SystemExit(f"o Manager saiu (código {proc.returncode}); a porta está livre?")
+        try:
+            with urllib.request.urlopen(f"{url}/health", timeout=2) as resp:
+                if resp.status == 200:
+                    return
+        except OSError:
+            time.sleep(0.3)
+    raise SystemExit("o Manager não respondeu a tempo")
+
+
+def enroll(root: Path, pc: str, url: str, code: str, name: str) -> dict:
+    return json.loads(tsm(root, pc, "enroll", "--manager", url, "--invite", code, "--name",
+                          name, "--device-name", f"{pc} da demo", "--json"))
 
 
 def create(root: Path, port: int) -> None:
     root.mkdir(parents=True)
     (root / MARKER).write_text("criado por scripts/collab_local_setup.py\n", encoding="utf-8")
-    tokens = {k: secrets.token_urlsafe(24) for k in ("pca", "pcb", "admin")}
-    manager = {
-        "version": 1, "root": "srv",
-        "projects": [{"id": "demo", "bindings": [
-            {"id": "demo-pca", "device": "pca", "workspace": "pca"},
-            {"id": "demo-pcb", "device": "pcb", "workspace": "pcb"}]}],
-        "identities": [
-            {"name": "dev-a", "role": "developer", "device": "pca",
-             "token_sha256": _sha(tokens["pca"])},
-            {"name": "dev-b", "role": "developer", "device": "pcb",
-             "token_sha256": _sha(tokens["pcb"])},
-            {"name": "admin", "role": "admin", "token_sha256": _sha(tokens["admin"])},
-        ],
-    }
-    (root / "manager.json").write_text(json.dumps(manager, indent=2), encoding="utf-8")
-    subprocess.run([sys.executable, "-m", "tsm_manager", "migrate", "--config",
-                    str(root / "manager.json")], check=True)
-    subprocess.run([sys.executable, "-m", "tsm_manager", "init-project", "--config",
-                    str(root / "manager.json"), "--project", "demo", "--from", str(DEMO)],
-                   check=True)
+    (root / "manager.json").write_text(json.dumps({
+        "version": 2, "root": "srv", "shared_group": "tsm-readers",
+        "workspace_group": "tsm-ws", "provisioner": {"mode": "local"},
+        "projects": [{"id": "demo"}],
+    }, indent=2), encoding="utf-8")
+    manager(root, "migrate")
+    manager(root, "init-project", "--project", "demo", "--from", str(DEMO))
     url = f"http://127.0.0.1:{port}"
-    for name, device in (("pcA", "pca"), ("pcB", "pcb")):
-        (root / name).mkdir()
-        (root / name / "token").write_text(tokens[device], encoding="utf-8")
-        cfg = {
-            "version": 2, "device_id": device,
-            "mutagen": {"data_directory": f"{name}/mutagen-data"},
-            "state_directory": f"{name}/state",
-            "manager": {"url": url, "token_file": f"{name}/token"},
-            "bindings": [{
-                "id": f"demo-{device}", "project_id": "demo",
-                "local": f"{name}/work", "cache": f"{name}/cache",
-                "workspace": f"srv/projects/demo/workspaces/{device}",
-                "shared": "srv/projects/demo/shared",
-            }],
-        }
-        (root / f"{name}.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
-    (root / "admin-token").write_text(tokens["admin"], encoding="utf-8")
-    admin = json.loads((root / "pcA.json").read_text(encoding="utf-8"))
-    admin["manager"]["token_file"] = "admin-token"
-    (root / "admin.json").write_text(json.dumps(admin, indent=2), encoding="utf-8")
+    log = open(root / "setup-serve.log", "wb")  # noqa: SIM115 - fechado abaixo
+    proc = subprocess.Popen([sys.executable, "-m", "tsm_manager", "serve", "--config",
+                             str(root / "manager.json"), "--port", str(port)],
+                            stdout=log, stderr=subprocess.STDOUT)
+    try:
+        wait_health(url, proc)
+        boot = json.loads(manager(root, "bootstrap-admin", "--project", "demo", "--json"))
+        admin = enroll(root, "admin", url, boot["code"], "Admin")
+        manager(root, "requests", "approve", admin["device_id"], "--fingerprint",
+                admin["fingerprint"])
+        print(f"admin: dispositivo {admin['device_id']} aprovado ({admin['fingerprint']})")
+        for pc, name in (("pcA", "Dev A"), ("pcB", "Dev B")):
+            invite = json.loads(tsm(root, "admin", "admin", "invite", "create", "--project",
+                                    "demo", "--json"))
+            dev = enroll(root, pc, url, invite["code"], name)
+            tsm(root, "admin", "admin", "requests", "approve", dev["device_id"],
+                "--fingerprint", dev["fingerprint"])
+            print(f"{pc}: dispositivo {dev['device_id']} aprovado ({dev['fingerprint']})")
+    finally:
+        proc.terminate()
+        proc.wait(10)
+        log.close()
 
 
 def main() -> int:
@@ -99,19 +138,22 @@ def main() -> int:
         if not (root / MARKER).is_file():
             print(f"{root} não foi criado por este script; nada apagado", file=sys.stderr)
             return 2
-        for name in ("pcA", "pcB"):
-            cfg = root / f"{name}.json"
-            if cfg.is_file():
-                subprocess.run([sys.executable, "-m", "tsm_client", "--config", str(cfg),
+        for pc in PCS:
+            home = root / pc / "home"
+            if (home / "config.json").is_file():
+                subprocess.run([sys.executable, "-m", "tsm_client", "--home", str(home),
                                 "teardown", "--stop-daemon"], check=False)
-        shutil.rmtree(root)
+        remove_tree(root)
     create(root, args.port)
     rel = root.relative_to(REPO_ROOT) if root.is_relative_to(REPO_ROOT) else root
     print(f"ambiente criado em {rel}")
     print(f"  Manager: .venv\\Scripts\\tsm-manager serve --config {rel}\\manager.json "
           f"--port {args.port}")
-    print(f"  PC A:    .venv\\Scripts\\tsm --config {rel}\\pcA.json init")
-    print(f"  PC B:    .venv\\Scripts\\tsm --config {rel}\\pcB.json init")
+    for pc in ("pcA", "pcB", "admin"):
+        print(f"  {pc + ':':6}   .venv\\Scripts\\tsm --home {rel}\\{pc}\\home bind --project "
+              f"demo --local {rel}\\{pc}\\work")
+    print("  depois: tsm --home <home> status | publish | pull | history | whoami "
+          "(rollback e audit pelo admin)")
     return 0
 
 

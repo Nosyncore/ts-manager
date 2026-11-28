@@ -55,7 +55,6 @@ def load(tmp_path, data):
 
 def test_minimal_local_config_has_defaults(tmp_path):
     cfg = load(tmp_path, base())
-    assert cfg.version == 2 and cfg.is_v2
     assert cfg.root == (tmp_path / "srv").resolve()
     assert cfg.database == cfg.root / "manager" / "manager.db"
     assert cfg.shared_group == "tsm-readers" and cfg.workspace_group == "tsm-ws"
@@ -65,8 +64,8 @@ def test_minimal_local_config_has_defaults(tmp_path):
     assert cfg.auth == AuthConfig()
     assert cfg.auth.ssh_keygen == default_executable()
     assert cfg.auth.sshsig_timeout_s == 5
-    assert cfg.identities == ()
-    assert dict(cfg.projects["demo"].bindings) == {}
+    assert cfg.backups == cfg.root / "manager" / "backups"
+    assert not hasattr(cfg, "identities") and not hasattr(cfg.projects["demo"], "bindings")
 
 
 def test_full_config(tmp_path):
@@ -93,11 +92,37 @@ def test_ssh_host_accepted(tmp_path, host):
         == host
 
 
-def test_version_1_still_loads(tmp_path):
-    cfg = load(tmp_path, {"version": 1, "root": "srv",
-                          "projects": [{"id": "demo", "bindings": []}], "identities": []})
-    assert cfg.version == 1 and not cfg.is_v2
-    assert cfg.provisioner is None and cfg.auth is None and cfg.workspace_group is None
+def test_version_1_is_refused_with_migration_message(tmp_path):
+    with pytest.raises(ManagerConfigError) as exc:
+        load(tmp_path, {"version": 1, "root": "srv",
+                        "projects": [{"id": "demo", "bindings": []}], "identities": []})
+    msg = str(exc.value)
+    assert "version 1" in msg and "não é mais aceita" in msg
+    for hint in ("identities", "bindings", "bootstrap-admin", "workspace_group", "provisioner"):
+        assert hint in msg
+
+
+@pytest.mark.parametrize("version", [0, 3, "2", None])
+def test_other_versions_refused(tmp_path, version):
+    with pytest.raises(ManagerConfigError, match="suportada: 2"):
+        load(tmp_path, base(version=version))
+
+
+def test_database_under_root(tmp_path):
+    root = (tmp_path / "srv").resolve()
+    assert load(tmp_path, base(database="db/x.db")).database == root / "db" / "x.db"
+    assert load(tmp_path, base(database=str(root / "y.db"))).database == root / "y.db"
+
+
+@pytest.mark.parametrize("database", ["../fora.db", "", ".", "manager/../../fora.db", 7])
+def test_database_outside_root_rejected(tmp_path, database):
+    with pytest.raises(ManagerConfigError, match="database"):
+        load(tmp_path, base(database=database))
+
+
+def test_database_absolute_outside_root_rejected(tmp_path):
+    with pytest.raises(ManagerConfigError, match="fora de root"):
+        load(tmp_path, base(database=str((tmp_path / "outro" / "m.db").resolve())))
 
 
 def _set(path: str, value):
@@ -160,6 +185,10 @@ _DELETE = object()
     (_set("database", "../fora.db"), "database"),
     (_set("test_faults", "sim"), "test_faults"),
     (_set("projects", []), "projects"),
+    (_set("projects.0.id", "Demo"), "id"),
+    (_set("projects.0.limits", {"max_files": 0}), "max_files"),
+    (_set("projects.0.rules", {"ignore": ["a,b"]}), "rules"),
+    (_set("extra", 1), "extra"),
 ])
 def test_invalid_v2(tmp_path, mutate, field):
     data = copy.deepcopy(full())
@@ -180,6 +209,11 @@ def test_invite_ttl_above_max_rejected(tmp_path):
     data["auth"]["invite_ttl_s"] = data["auth"]["invite_ttl_max_s"] + 1
     with pytest.raises(ManagerConfigError, match="invite_ttl_s"):
         load(tmp_path, data)
+
+
+def test_duplicate_project_rejected(tmp_path):
+    with pytest.raises(ManagerConfigError, match="duplicado"):
+        load(tmp_path, base(projects=[{"id": "demo"}, {"id": "demo"}]))
 
 
 def test_version_2_with_v1_fields_mentions_identity(tmp_path):

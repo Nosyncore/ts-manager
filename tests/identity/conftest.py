@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from tests.manager.conftest import DEMO
-from tests.manager.test_identity_api import Server
+from tests.manager.server import Server
 from tsm_client.adapters.manager import UrllibTransport
 from tsm_client.cli import run
 from tsm_client.enroll import Toolkit

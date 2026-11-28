@@ -16,22 +16,28 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import REPO_ROOT
-from tests.unit.manager_fakes import FakeGit, FakeStore
+from tests.unit.manager_fakes import FakeBindings, FakeGit, FakeStore
 from tsm_common import protocol as P
 from tsm_common.protocol import REVISION_FILE, RevisionInfo
 from tsm_common.rules import ProjectRules, rules_digest
 from tsm_manager import project as project_mod
 from tsm_manager.adapters.git import Author
-from tsm_manager.bindings import ConfigBindings
-from tsm_manager.config import BindingConfig, Identity, Limits, ProjectConfig
+from tsm_manager.config import BindingConfig, Limits, ProjectConfig
 from tsm_manager.faults import Faults, SimulatedCrash
 from tsm_manager.layout import ProjectLayout
-from tsm_manager.project import MAIN, ProjectError, ProjectService, RecoveryError, binding_ref
+from tsm_manager.project import (
+    MAIN,
+    ProjectError,
+    ProjectService,
+    RecoveryError,
+    Requester,
+    binding_ref,
+)
 
 DEMO = REPO_ROOT / "examples" / "demo-project"
 SPELLS = "data/scripts/spells.lua"
-DEV = Identity("dev-a", "developer", "pca", "a" * 64)
-ADMIN = Identity("admin", "admin", None, "c" * 64)
+DEV = Requester("dev-a", "u-dev-a", "pca", False)
+ADMIN = Requester("admin", "u-admin", "pc-admin", True)
 
 
 class Env:
@@ -42,13 +48,13 @@ class Env:
         self.git = FakeGit(self.events, on_update_refs=self._journal_snapshot)
         self.store = FakeStore(self.events)
         self.faults = faults or Faults()
-        self.project = ProjectConfig("demo", ProjectRules(), Limits(), {
-            "demo-pca": BindingConfig("demo-pca", "pca", "pca")})
+        self.project = ProjectConfig("demo", ProjectRules(), Limits())
+        self.bindings = FakeBindings([BindingConfig("demo-pca", "pca", "tsm-d-0123456789ab")])
         self.svc = self.service()
 
     def service(self) -> ProjectService:
         return ProjectService(self.project, self.layout, git=self.git, store=self.store,
-                              bindings=ConfigBindings(self.project), faults=self.faults,
+                              bindings=self.bindings, faults=self.faults,
                               lock_timeout=5)
 
     def _journal_snapshot(self, _updates) -> None:
@@ -60,7 +66,7 @@ class Env:
         return self.svc.bindings.get("demo-pca")
 
     def write_workspace(self, rel: str, data: bytes) -> dict:
-        p = self.layout.workspace("pca") / rel
+        p = self.layout.sync_root(self.binding.workspace) / rel
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_bytes(data)
         return {"path": rel, "op": "put", "sha256": hashlib.sha256(data).hexdigest(),
@@ -319,21 +325,11 @@ def test_init_rejects_source_without_project_file(tmp_path):
     assert out.status == P.REJECTED and not e.git.refs
 
 
-class TreeBindings(ConfigBindings):
-    """Vínculos como os do banco: o conteúdo fica em ``workspaces/<conta>/tree``."""
-
-    def workspace_path(self, layout, binding):
-        return layout.sync_root(binding.workspace)
-
-
-def test_publish_with_requester_and_tree_workspace(env):
-    from tsm_manager.project import Requester
-
-    svc = ProjectService(env.project, env.layout, git=env.git, store=env.store,
-                         bindings=TreeBindings(env.project), lock_timeout=5)
+def test_publish_with_requester_reads_the_tree_workspace(env):
+    svc = env.svc
     who = Requester("Fulano <x>", "u-123", "d-456", False)
     data = b"mana = 3\n"
-    target = env.layout.sync_root("pca") / SPELLS
+    target = env.layout.sync_root("tsm-d-0123456789ab") / SPELLS
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
     change = {"path": SPELLS, "op": "put", "sha256": hashlib.sha256(data).hexdigest(),
@@ -349,18 +345,3 @@ def test_publish_with_requester_and_tree_workspace(env):
     assert rev["user"] == "Fulano <x>" and rev["device"] == "d-456"
     assert svc.rollback(who, {}).status == P.FORBIDDEN
 
-
-def test_identity_keeps_the_test_identity_trailers(env):
-    out = env.svc.publish(DEV, env.binding, env.request([env.write_workspace(SPELLS, b"z\n")]))
-    commit = env.git.commits[out.payload["commit"]]
-    assert commit.author_email == "dev-a@pca.tsm"
-    assert "TSM-User-Id" not in commit.message
-
-
-def test_requester_from_identity():
-    from tsm_manager.project import Requester
-
-    assert Requester.of(DEV) == Requester("dev-a", "dev-a", "pca", False)
-    assert Requester.of(ADMIN) == Requester("admin", "admin", None, True)
-    who = Requester("x", "u", "d", True)
-    assert Requester.of(who) is who

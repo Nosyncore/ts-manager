@@ -1,12 +1,9 @@
 """API HTTP do Manager (FastAPI). Rotas finas sobre ``ProjectService`` e o domínio.
 
-Só escuta em loopback. O modo é fixado pela config ao abrir o Manager, nunca por requisição:
-
-- ``version: 2``: sessão por challenge-response (``Authorization: Bearer tsm-s-…``),
-  reconferida no banco a cada requisição; rotas ``/auth``, ``/me``, ``/connection`` e
-  ``/admin``; vínculos do banco; autorização pela matriz de ``identity.authz``;
-- ``version: 1``: identidade de teste por token fixo da config, só com as rotas de projeto
-  (será removida). Nenhum token de teste é aceito na ``version: 2``.
+Só escuta em loopback. Autenticação só por sessão de challenge-response
+(``Authorization: Bearer tsm-s-…``), reconferida no banco a cada requisição; rotas
+``/auth``, ``/me``, ``/connection`` e ``/admin``; vínculos do banco; autorização pela matriz
+de ``identity.authz``.
 
 Erros: corpo ``{status, message}`` com o código HTTP de ``tsm_common.protocol``.
 """
@@ -28,11 +25,9 @@ from tsm_manager.api_identity import (
     SessionGate,
     identity_router,
 )
-from tsm_manager.auth import authenticate, can_read, owns_binding
-from tsm_manager.config import BindingConfig
 from tsm_manager.identity.base import IdentityError
 from tsm_manager.identity.ratelimit import RateLimiter, RefusalAudit
-from tsm_manager.project import Outcome, ProjectService, Requester
+from tsm_manager.project import Outcome
 from tsm_manager.services import Manager
 
 
@@ -46,53 +41,12 @@ def _outcome(o: Outcome) -> JSONResponse:
     return JSONResponse(o.body(), status_code=o.http_status)
 
 
-class LegacyGate:
-    """Identidade de teste (config ``version: 1``): token fixo → identidade da config."""
-
-    def __init__(self, manager: Manager) -> None:
-        self.manager = manager
-
-    def project(self, authorization: str | None, project_id: str
-                ) -> tuple[ProjectService, Requester]:
-        identity = authenticate(self.manager.cfg, authorization)
-        if identity is None:
-            raise IdentityError(P.UNAUTHORIZED, "token ausente ou inválido")
-        svc = self.manager.projects.get(project_id)
-        if svc is None or not can_read(identity, svc.bindings):
-            raise IdentityError(P.NOT_FOUND, "projeto não encontrado")
-        if not svc.initialized:
-            raise IdentityError(P.NOT_FOUND, "projeto não inicializado")
-        return svc, Requester.of(identity)
-
-    def owned_binding(self, authorization: str | None, project_id: str, binding_id: str
-                      ) -> tuple[ProjectService, Requester, BindingConfig]:
-        svc, who = self.project(authorization, project_id)
-        binding = svc.bindings.get(binding_id)
-        identity = authenticate(self.manager.cfg, authorization)
-        if binding is None or identity is None or not owns_binding(identity, binding):
-            raise IdentityError(P.FORBIDDEN, "vínculo não pertence a este dispositivo")
-        return svc, who, binding
-
-    def admin(self, authorization: str | None, project_id: str, what: str
-              ) -> tuple[ProjectService, Requester]:
-        svc, who = self.project(authorization, project_id)
-        if not who.is_admin and what == "audit":
-            raise IdentityError(P.FORBIDDEN, "auditoria exige admin")
-        return svc, who  # rollback: o ProjectService recusa quem não é admin
-
-
 def create_app(manager: Manager, *, limiter: RateLimiter | None = None,
                refusals: RefusalAudit | None = None) -> FastAPI:
     app = FastAPI(title="TS Manager", version=__version__, docs_url=None, redoc_url=None,
                   openapi_url=None)
-    identity = manager.identity
-    gate: LegacyGate | SessionGate
-    if identity is None:
-        gate = LegacyGate(manager)
-    else:
-        gate = SessionGate(manager)
-        app.include_router(identity_router(manager, gate, limiter=limiter,
-                                           refusals=refusals))
+    gate = SessionGate(manager)
+    app.include_router(identity_router(manager, gate, limiter=limiter, refusals=refusals))
 
     @app.exception_handler(IdentityError)
     def _identity_error(_request: Request, exc: IdentityError) -> JSONResponse:
@@ -106,7 +60,7 @@ def create_app(manager: Manager, *, limiter: RateLimiter | None = None,
 
     @app.exception_handler(RequestValidationError)
     async def _validation(request: Request, exc: RequestValidationError) -> JSONResponse:
-        if identity is not None and request.url.path.startswith(IDENTITY_PREFIXES):
+        if request.url.path.startswith(IDENTITY_PREFIXES):
             return error_response(P.INVALID_REQUEST, "requisição inválida")
         return await request_validation_exception_handler(request, exc)
 

@@ -1,7 +1,6 @@
 """Fonte dos vínculos de um projeto (dispositivo ↔ workspace).
 
-O ``ProjectService`` e a API consultam os vínculos só por esta interface. ``ConfigBindings``
-lê a config ``version: 1`` (identidade de teste, será removida); ``DbBindings`` lê
+O ``ProjectService`` e a API consultam os vínculos só por esta interface. ``DbBindings`` lê
 ``workspace_bindings`` (vínculos criados na aprovação de dispositivos). A fonte também diz
 onde fica o diretório sincronizado de cada vínculo.
 """
@@ -11,7 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from tsm_manager.config import BindingConfig, ProjectConfig
+from tsm_manager.config import BindingConfig
 from tsm_manager.db.repository import Binding, Repository
 from tsm_manager.layout import ProjectLayout
 
@@ -28,22 +27,6 @@ class BindingSource(Protocol):
     def workspace_path(self, layout: ProjectLayout, binding: BindingConfig) -> Path:
         """Diretório sincronizado do vínculo, de onde a publicação copia os arquivos."""
         ...
-
-
-class ConfigBindings:
-    """Vínculos declarados em ``projects[].bindings`` da config."""
-
-    def __init__(self, project: ProjectConfig) -> None:
-        self._by_id = dict(project.bindings)
-
-    def get(self, binding_id: str) -> BindingConfig | None:
-        return self._by_id.get(binding_id)
-
-    def for_device(self, device: str) -> BindingConfig | None:
-        return next((b for b in self._by_id.values() if b.device == device), None)
-
-    def workspace_path(self, layout: ProjectLayout, binding: BindingConfig) -> Path:
-        return layout.workspace(binding.workspace)
 
 
 def _config(binding: Binding | None) -> BindingConfig | None:

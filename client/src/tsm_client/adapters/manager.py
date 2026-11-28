@@ -7,9 +7,9 @@ resultados normais e voltam como ``Response``; só falhas de rede viram exceçã
   sistema ou um arquivo de CA. Sem usuário, query nem fragmento na URL.
 - Sem proxy do ambiente e sem seguir redirecionamentos: o ``urllib`` repassaria o
   ``Authorization`` ao destino de um redirecionamento.
-- Autenticação plugável (``auth``): token fixo (config ``version: 2``) ou sessão por
-  challenge-response (``tsm_client.login``), que pode pedir uma repetição da requisição.
-  A repetição reenvia exatamente o mesmo corpo.
+- Autenticação plugável (``auth``): a sessão por challenge-response (``tsm_client.login``),
+  que pode pedir uma repetição da requisição. A repetição reenvia exatamente o mesmo corpo.
+  Sem ``auth``, só as rotas públicas (desafio, cadastro, verificação) servem.
 - 429 vira ``RateLimited`` (repita depois).
 """
 
@@ -138,30 +138,16 @@ class Auth(Protocol):
     def check(self, client: ManagerClient, resp: Response) -> None: ...
 
 
-class StaticToken:
-    """Token fixo da config ``version: 2`` (identidade de teste do Manager ``version: 1``)."""
-
-    def __init__(self, token: str) -> None:
-        self.token = token
-
-    def header(self, client: ManagerClient) -> str | None:
-        return f"Bearer {self.token}"
-
-    def retry(self, client: ManagerClient, resp: Response) -> bool:
-        return False
-
-    def check(self, client: ManagerClient, resp: Response) -> None:
-        return None
-
-
 # ---------------------------------------------------------------- cliente
 
 
 class ManagerClient:
-    def __init__(self, url: str, auth: Auth | str | None = None, *, timeout: float = 120.0,
+    def __init__(self, url: str, auth: Auth | None = None, *, timeout: float = 120.0,
                  transport: Transport | None = None, ca_file: Path | None = None) -> None:
+        if isinstance(auth, str):
+            raise TypeError("auth: use a sessão do dispositivo, não um token fixo")
         self.url = check_url(url)
-        self.auth: Auth | None = StaticToken(auth) if isinstance(auth, str) else auth
+        self.auth: Auth | None = auth
         self.timeout = timeout
         self.transport: Transport = transport or UrllibTransport(ca_file=ca_file)
 

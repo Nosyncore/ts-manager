@@ -7,14 +7,13 @@ import uuid
 import pytest
 
 from tests.manager.conftest import (
-    ADMIN,
-    DEV_A,
     assert_shared_is_main,
     dev,
     main_files,
     make_project,
     refs,
     reopen,
+    requester,
     shared_files,
 )
 from tsm_manager.faults import Faults, SimulatedCrash
@@ -106,6 +105,7 @@ def test_rollback_creates_new_revision(svc, a, b):
     assert b.publish(["data/b.lua"]).status == "published"
     history_before = [r["commit"] for r in svc.revisions()]
     key = str(uuid.uuid4())
+    DEV_A, ADMIN = requester(svc, "a"), requester(svc, "admin")
     # não admin
     assert svc.rollback(DEV_A, {"idempotency_key": key, "target": 1}).status == "forbidden"
     out = svc.rollback(ADMIN, {"idempotency_key": key, "target": 1, "message": "volta"})

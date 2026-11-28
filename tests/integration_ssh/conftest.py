@@ -33,8 +33,8 @@ from tests.integration.conftest import (
     Pc,
     _mutagen_temporaries,
     _outside_snapshot,
+    pc_config,
     wait_until,
-    write_config,
 )
 from tsm_client.rules import IgnoreMatcher, ProjectRules
 
@@ -245,12 +245,11 @@ def ssh_layout(tmp_path, sshd, mutagen_exe, ssh_dir) -> Iterator[SshLayout]:
         pc_root = tmp_path / pc_name
         shutil.copytree(DEMO, pc_root / "work")
         home = make_ssh_home(pc_root / "ssh-home", sshd, ssh_dir, user=user, alias=alias)
-        cfg_path = tmp_path / f"{pc_name}.json"
-        write_config(pc_root, cfg_path, exe=mutagen_exe, binding=f"demo-{pc_name.lower()}",
-                     workspace=f"{alias}:{SshLayout.workspace(dev)}",
-                     shared=f"{alias}:{SshLayout.shared}", rules=rules,
-                     ssh_path=ssh_dir, ssh_home=home)
-        lay.pcs[pc_name] = Pc(pc_name, pc_root, cfg_path, rules, mutagen_exe,
+        cfg = pc_config(pc_root, exe=mutagen_exe, binding=f"demo-{pc_name.lower()}",
+                        workspace=f"{alias}:{SshLayout.workspace(dev)}",
+                        shared=f"{alias}:{SshLayout.shared}", rules=rules,
+                        ssh_path=ssh_dir, ssh_home=home)
+        lay.pcs[pc_name] = Pc(pc_name, pc_root, cfg, rules, mutagen_exe,
                               pc_root / "mutagen-data", ssh_path=ssh_dir, ssh_home=home)
     before = _outside_snapshot(tmp_path, lay.mutable_roots())
     remote_before = sshd.manifest(f"{REMOTE_PROJECT}/history")

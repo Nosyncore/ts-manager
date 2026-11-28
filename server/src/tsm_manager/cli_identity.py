@@ -1,4 +1,4 @@
-"""Comandos de identidade do ``tsm-manager`` (config ``version: 2``), como operador local.
+"""Comandos de identidade do ``tsm-manager``, como operador local.
 
 ``bootstrap-admin``, ``invites``, ``requests``, ``users`` e ``devices`` usam os mesmos
 serviços de domínio da API, com o ator ``operador``: só pela CLI do servidor existem o
@@ -25,7 +25,6 @@ from tsm_manager.provisioning.service import OpResult
 if TYPE_CHECKING:
     from tsm_manager.services import IdentityServices, Manager
 
-COMMANDS = ("bootstrap-admin", "invites", "requests", "users", "devices")
 EXIT_OK, EXIT_FAIL, EXIT_PROBLEMS = 0, 1, 3
 OPERATOR = Actor.operator()
 _DURATION_RE = re.compile(r"^(\d{1,7})([smhd]?)$")
@@ -108,7 +107,6 @@ def _results(out: TextIO, results: list[OpResult]) -> int:
 
 def run(args: argparse.Namespace, manager: Manager, out: TextIO) -> int:
     ids = manager.identity
-    assert ids is not None
     match args.command:
         case "bootstrap-admin":
             return _bootstrap(args, ids, out)
@@ -239,4 +237,4 @@ def _devices(args: argparse.Namespace, ids: IdentityServices, out: TextIO) -> in
     return EXIT_OK
 
 
-__all__ = ["COMMANDS", "add_commands", "parse_duration", "run"]
+__all__ = ["add_commands", "parse_duration", "run"]

@@ -1,4 +1,8 @@
-"""Colaboração local com Mutagen, Git e HTTP reais."""
+"""Colaboração local com Mutagen, Git, HTTP e identidade reais.
+
+Os PCs se cadastram pelo ``tsm enroll`` e se vinculam pelo ``tsm bind``, que inicializa a
+pasta (o ``init`` da colaboração); daí em diante os comandos são os mesmos de sempre.
+"""
 
 from __future__ import annotations
 
@@ -33,7 +37,7 @@ def work_tree(pc) -> dict[str, bytes]:
 
 def test_init(collab: Collab):
     a = collab.a
-    code, out, err = a.tsm("init")
+    code, out, err = a.bind()
     assert "inicializado em r1" in out
     assert work_tree(a) == demo_tree()
     st = a.state()
@@ -41,11 +45,11 @@ def test_init(collab: Collab):
     assert not (a.work / ".tsm").exists()
     _code, out, _ = a.tsm("status")
     assert "base r1" in out and "Manager em r1" in out
-    assert "tsm-demo-pca-up" in out and "watching" in out
+    assert f"tsm-{a.binding}-up" in out and "watching" in out
     # pasta não vazia é recusada; init repetido também
     collab.b.work.mkdir(parents=True)
     (collab.b.work / "x.txt").write_text("x")
-    collab.b.tsm("init", expect=3)
+    collab.b.bind(expect=3)
     a.tsm("init", expect=3)
 
 
@@ -69,7 +73,7 @@ def test_distinct_files(ready: Collab):
         assert pc.state()["base_revision"] == 3
     assert work_tree(a) == work_tree(b) == ready.main_files()
     _, out, _ = a.tsm("history")
-    assert out.splitlines()[0].startswith("r3") and "dev-b@pcb" in out
+    assert out.splitlines()[0].startswith("r3") and f"dev-b@{b.device_id}" in out
     _, out, _ = a.tsm("show", "r2")
     assert f"M {SPELLS}" in out
     ready.verify()
@@ -130,10 +134,10 @@ def test_resolve_theirs_keeps_preimage(ready: Collab):
     a.tsm("publish", SPELLS)
     b.tsm("pull", "--resolve", f"{SPELLS}=theirs")
     assert b.read(SPELLS) == a.read(SPELLS)
-    rec = json.loads(sorted((b.root / "state" / "bindings" / b.binding / "pulls")
+    rec = json.loads(sorted((b.state_dir / "bindings" / b.binding / "pulls")
                             .glob("*.json"))[-1].read_text("utf-8"))
     pre = next(o["preimage"] for o in rec["ops"] if o["path"] == SPELLS)
-    assert ObjectStore(b.root / "state" / "objects").read(pre) == mine
+    assert ObjectStore(b.state_dir / "objects").read(pre) == mine
 
 
 def test_pull_preserves_unpublished_change(ready: Collab):
@@ -186,7 +190,7 @@ def test_offline_manager_and_paused_upload(ready: Collab):
 def test_pull_during_materialization(collab: Collab):
     collab.manager.restart({"delay_per_file": 0.6})
     for pc in collab.pcs.values():
-        pc.tsm("init", "--wait", "90")
+        pc.bind("--wait", "90")
     a, b = collab.a, collab.b
     for i in range(8):
         b.write(f"data/many/f{i}.lua", f"return {i}\n")
@@ -278,7 +282,7 @@ def test_ignored_in_workspace(ready: Collab):
     a.write("data/extra/x.lua", "return 1\n")
     a.tsm("publish", "data/extra/x.lua")
     # conteúdo ignorado no workspace impede o Mutagen de remover o diretório
-    ws_extra = ready.workspace("pca") / "data" / "extra"
+    ws_extra = ready.a.workspace / "data" / "extra"
     (ws_extra / "debug.log").write_text("log no workspace\n")
     (a.work / "data" / "extra" / "x.lua").unlink()
     (a.work / "data" / "extra").rmdir()
@@ -327,7 +331,7 @@ def test_local_git_untouched(ready: Collab):
     b.tsm("publish", CREATURES)
     a.tsm("pull")
     assert tree_hash(a.work / ".git") == before
-    assert not (ready.workspace("pca") / ".git").exists()
+    assert not (ready.a.workspace / ".git").exists()
     assert ".git/HEAD" not in ready.main_files()
 
 

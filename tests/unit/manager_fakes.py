@@ -1,4 +1,4 @@
-"""Git e Store em memória para os unitários do ``ProjectService``.
+"""Git, Store e vínculos em memória para os unitários do ``ProjectService``.
 
 O ``FakeGit`` modela objetos, árvores (dicionários caminho → blob), commits e refs com a
 mesma interface do adaptador real. O merge é só por caminho: um lado mudou → vale esse
@@ -19,7 +19,26 @@ from pathlib import Path
 from typing import Any
 
 from tsm_manager.adapters.git import CommitInfo, MergeConflict, MergeResult
+from tsm_manager.config import BindingConfig
+from tsm_manager.layout import ProjectLayout
 from tsm_manager.store import Store
+
+
+class FakeBindings:
+    """Vínculos fixos, com o diretório sincronizado da conta (``workspaces/<conta>/tree``)
+    como na ``DbBindings``."""
+
+    def __init__(self, bindings: Iterable[BindingConfig]) -> None:
+        self._by_id = {b.id: b for b in bindings}
+
+    def get(self, binding_id: str) -> BindingConfig | None:
+        return self._by_id.get(binding_id)
+
+    def for_device(self, device: str) -> BindingConfig | None:
+        return next((b for b in self._by_id.values() if b.device == device), None)
+
+    def workspace_path(self, layout: ProjectLayout, binding: BindingConfig) -> Path:
+        return layout.sync_root(binding.workspace)
 
 
 class FakeGit:

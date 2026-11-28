@@ -24,9 +24,6 @@ class ProjectLayout:
     def workspaces(self) -> Path:
         return self.project_dir / "workspaces"
 
-    def workspace(self, name: str) -> Path:
-        return self.workspaces / name
-
     def account_gate(self, account: str) -> Path:
         """Portão do workspace de uma conta de dispositivo (``<conta>:<grupo do Manager>``)."""
         return self.workspaces / account

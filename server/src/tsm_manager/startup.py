@@ -141,7 +141,6 @@ class Maintenance:
 def prepare_identity(manager: Manager, *, log: Callable[[str], None]) -> Maintenance:
     """Passos 2 a 6 da inicialização; devolve a manutenção já com a primeira rodada feita."""
     ids = manager.identity
-    assert ids is not None
     cfg = manager.cfg
     if cfg.ssh is not None:
         try:

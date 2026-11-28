@@ -90,14 +90,14 @@ def cli(tmp_path) -> Cli:
     return Cli(tmp_path)
 
 
-def test_identity_commands_need_version_2(tmp_path):
+def test_identity_commands_refuse_version_1(tmp_path):
     p = tmp_path / "v1.json"
     p.write_text(json.dumps({"version": 1, "root": "srv", "projects": [
         {"id": "demo", "bindings": []}], "identities": []}), encoding="utf-8")
     for args in (["bootstrap-admin", "--project", "demo"], ["users", "list"],
                  ["devices", "list"], ["requests", "list"], ["invites", "list"]):
         code, _, err = tsm_manager(*args, "--config", str(p))
-        assert code == EXIT_CONFIG and "version 2" in err
+        assert code == EXIT_CONFIG and "version 1" in err and "não é mais aceita" in err
 
 
 def test_identity_commands_need_current_database(tmp_path):
@@ -269,19 +269,3 @@ def test_serve_v2_refuses_missing_groups(cli, monkeypatch):
     monkeypatch.setattr("tsm_manager.startup.check_process_groups", refuse)
     code, _, err = cli.run("serve")
     assert code == EXIT_FAIL and "tsm-ws" in err
-
-
-def test_serve_v1_warns_about_the_test_identity(tmp_path, monkeypatch):
-    p = tmp_path / "v1.json"
-    p.write_text(json.dumps({"version": 1, "root": "srv", "projects": [
-        {"id": "demo", "bindings": []}], "identities": []}), encoding="utf-8")
-    assert tsm_manager("migrate", "--config", str(p))[0] == EXIT_OK
-    calls = {}
-
-    def fake_run(app, **_kw):
-        with TestClient(app) as client:
-            calls["status"] = client.post("/auth/challenge", json={}).status_code
-
-    monkeypatch.setattr("uvicorn.run", fake_run)
-    code, _, err = tsm_manager("serve", "--config", str(p))
-    assert code == EXIT_OK and "identidade de teste" in err and calls["status"] == 404

@@ -3,6 +3,11 @@
 Os workspaces são escritos diretamente pelo teste, como o Mutagen faria. O "dev" é um
 pequeno modelo do Client: mantém a base (commit + manifesto) e monta as requisições. O
 banco do Manager fica em ``<root>/manager/manager.db``, migrado antes do uso.
+
+As identidades são reais (``tests/identity_seed.py``): ``dev-a`` e ``dev-b`` (developers)
+e ``admin`` (bootstrap) se cadastram com prova de posse e são aprovados com o
+``LocalProvisioner``; os vínculos vêm do banco (``DbBindings``) e cada workspace é o
+``workspaces/<conta>/tree`` da conta do dispositivo.
 """
 
 from __future__ import annotations
@@ -17,18 +22,28 @@ from typing import Any
 import pytest
 
 from tests.conftest import REPO_ROOT
+from tests.identity_seed import KEYGEN, Seed, SeedDevice
 from tsm_common.protocol import REVISION_FILE, RevisionInfo
 from tsm_common.rules import ProjectRules, rules_digest
-from tsm_manager.config import DEFAULT_DATABASE, BindingConfig, Identity, Limits, ProjectConfig
-from tsm_manager.db import Database, upgrade
+from tsm_manager.bindings import DbBindings
+from tsm_manager.config import (
+    DEFAULT_DATABASE,
+    AuthConfig,
+    BindingConfig,
+    Limits,
+    ManagerConfig,
+    ProjectConfig,
+    ProvisionerConfig,
+)
+from tsm_manager.db import Database, Repository, upgrade
 from tsm_manager.faults import Faults
-from tsm_manager.project import Outcome, ProjectService, open_project
+from tsm_manager.project import Outcome, ProjectService, Requester, open_project
+from tsm_manager.services import build_identity
 
 DEMO = REPO_ROOT / "examples" / "demo-project"
 
-DEV_A = Identity("dev-a", "developer", "pca", "a" * 64)
-DEV_B = Identity("dev-b", "developer", "pcb", "b" * 64)
-ADMIN = Identity("admin", "admin", None, "c" * 64)
+# pessoas criadas por raiz do Manager: "a", "b", "admin" (e as que o teste pedir)
+PEOPLE: dict[Path, dict[str, SeedDevice]] = {}
 
 
 def sha(data: bytes) -> str:
@@ -38,14 +53,14 @@ def sha(data: bytes) -> str:
 @dataclass
 class Dev:
     svc: ProjectService
-    identity: Identity
+    identity: Requester
     binding: BindingConfig
     base: str
     files: dict[str, bytes] = field(default_factory=dict)  # estado "local" do dev
 
     @property
     def workspace(self) -> Path:
-        return self.svc.layout.workspace(self.binding.workspace)
+        return self.svc.bindings.workspace_path(self.svc.layout, self.binding)
 
     def sync_workspace(self) -> None:
         """Faz o workspace espelhar ``files`` (o papel do upload do Mutagen)."""
@@ -111,7 +126,9 @@ def migrated_db(root: Path) -> Database:
 
 def open_service(root: Path, project: ProjectConfig, **kw: Any) -> ProjectService:
     """Serviço sobre ``root``, com conexão própria ao banco (como um Manager novo)."""
-    return open_project(root, project, Database(root / DEFAULT_DATABASE), **kw)
+    db = Database(root / DEFAULT_DATABASE)
+    return open_project(root, project, db, bindings=DbBindings(Repository(db), project.id),
+                        **kw)
 
 
 def reopen(svc: ProjectService, **kw: Any) -> ProjectService:
@@ -119,18 +136,41 @@ def reopen(svc: ProjectService, **kw: Any) -> ProjectService:
     return open_service(svc.layout.root, svc.project, **kw)
 
 
+def manager_config(root: Path, project: ProjectConfig) -> ManagerConfig:
+    """Config ``version: 2`` local do Manager destes testes (sem arquivo em disco)."""
+    return ManagerConfig(root.parent / "manager.json", root, {project.id: project},
+                         root / DEFAULT_DATABASE, shared_group="tsm-readers",
+                         workspace_group="tsm-ws", provisioner=ProvisionerConfig("local"),
+                         auth=AuthConfig(ssh_keygen=str(KEYGEN)))
+
+
+def seed_for(root: Path, project: ProjectConfig, db: Database) -> Seed:
+    return Seed(build_identity(manager_config(root, project), db), root.parent / "keys")
+
+
 def make_project(tmp_path: Path, *, rules: ProjectRules | None = None,
-                 limits: Limits | None = None, faults: Faults | None = None) -> ProjectService:
-    project = ProjectConfig(
-        "demo", rules or ProjectRules(), limits or Limits(),
-        {"demo-pca": BindingConfig("demo-pca", "pca", "pca"),
-         "demo-pcb": BindingConfig("demo-pcb", "pcb", "pcb")},
-    )
+                 limits: Limits | None = None, faults: Faults | None = None,
+                 people: tuple[str, ...] = ("a", "b")) -> ProjectService:
+    """Projeto inicializado, com ``admin`` e os developers pedidos (``dev-<nome>``)."""
+    project = ProjectConfig("demo", rules or ProjectRules(), limits or Limits())
     root = tmp_path / "srv"
-    svc = open_project(root, project, migrated_db(root), faults=faults, lock_timeout=60)
+    db = migrated_db(root)
+    svc = open_project(root, project, db, bindings=DbBindings(Repository(db), "demo"),
+                       faults=faults, lock_timeout=60)
     out = svc.init_project(DEMO)
     assert out.status == "published", out.payload
+    seed = seed_for(root, project, db)
+    PEOPLE[root] = {"admin": seed.device("admin", admin=True),
+                    **{n: seed.device(f"dev-{n}") for n in people}}
     return svc
+
+
+def person(svc: ProjectService, which: str) -> SeedDevice:
+    return PEOPLE[svc.layout.root][which]
+
+
+def requester(svc: ProjectService, which: str) -> Requester:
+    return person(svc, which).requester
 
 
 @pytest.fixture
@@ -139,9 +179,11 @@ def svc(tmp_path: Path) -> ProjectService:
 
 
 def dev(svc: ProjectService, which: str) -> Dev:
-    ident = {"a": DEV_A, "b": DEV_B}[which]
-    binding = svc.bindings.get(f"demo-pc{which}")
-    d = Dev(svc, ident, binding, svc.git.resolve("refs/heads/main"), demo_files())
+    p = person(svc, which)
+    binding = svc.bindings.get(p.binding.id)
+    assert binding is not None
+    d = Dev(svc, p.requester, binding,
+            svc.git.resolve("refs/heads/main"), demo_files())
     d.sync_workspace()
     return d
 

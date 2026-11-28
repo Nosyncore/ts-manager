@@ -113,7 +113,6 @@ class SessionGate:
     """Autenticação e autorização das rotas (de projeto e de identidade) por sessão."""
 
     def __init__(self, manager: Manager) -> None:
-        assert manager.identity is not None
         self.manager = manager
         self.identity: IdentityServices = manager.identity
 

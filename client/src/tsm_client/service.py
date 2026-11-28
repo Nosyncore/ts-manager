@@ -3,7 +3,7 @@
 A CLI (e, futuramente, a GUI) chamam este módulo; ele não executa subprocessos diretamente.
 Só toca sessões com ``tsm-managed=true`` cujo ``tsm-binding`` pertence à configuração.
 
-Com colaboração (config ``version: 2``), um vínculo ainda não inicializado (``tsm init``)
+Com colaboração (config do ``<home>``), um vínculo ainda não inicializado (``tsm init``)
 só tem a sessão de download: a pasta local ainda não existe e o upload não pode espelhá-la.
 """
 

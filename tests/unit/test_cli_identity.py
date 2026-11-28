@@ -136,11 +136,21 @@ def test_whoami_text(cli):
     assert "vínculo b-1 (demo): (sem pasta local" in out
 
 
-def test_identity_commands_need_home(cli, tmp_path):
+def test_config_file_option_no_longer_exists(cli, tmp_path):
     cfg = tmp_path / "x.json"
     cfg.write_text("{}")
-    code, _, err = cli("--config", str(cfg), "whoami", home=False)
-    assert code == EXIT_CONFIG and "--home" in err
+    with pytest.raises(SystemExit) as exc:
+        cli("--config", str(cfg), "whoami", home=False)
+    assert exc.value.code == EXIT_CONFIG
+
+
+@pytest.mark.parametrize("version", [1, 2])
+@pytest.mark.parametrize("command", [["whoami"], ["status"], ["history"]])
+def test_old_config_in_home_is_refused(cli, version, command):
+    cli.home.mkdir()
+    (cli.home / "config.json").write_text(json.dumps({"version": version}), encoding="utf-8")
+    code, _, err = cli(*command)
+    assert code == EXIT_CONFIG and "não é mais aceita" in err and "tsm enroll" in err
 
 
 def test_home_from_environment(cli):
@@ -165,7 +175,7 @@ def test_bind_text_and_already_initialized(cli):
     code, out, _ = cli("bind", "--project", "demo")
     assert code == EXIT_OK and "conexão atualizada" in out and len(cli.inits) == 1
     cfg = load_home_config(Home(cli.home))
-    assert cfg.bindings[0].workspace.path == str(ws) and cfg.version == 3
+    assert cfg.bindings[0].workspace.path == str(ws) and cfg.home is not None
 
 
 def test_bind_host_key_warning(cli):
@@ -290,7 +300,7 @@ def test_tool_failures(cli, exc):
     assert code == EXIT_MUTAGEN and str(exc) in err.getvalue()
 
 
-def test_manager_client_by_version(cli, tmp_path):
+def test_manager_client_uses_the_session(cli, tmp_path):
     cli.enroll()
     cfg = load_home_config(Home(cli.home))
     client = manager_client(cfg, cli.toolkit())

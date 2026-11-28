@@ -1,29 +1,28 @@
-"""Integração local da colaboração: Mutagen + Git + HTTP reais.
+"""Integração local da colaboração com identidade real: Mutagen, Git, HTTP e ``ssh-keygen``.
 
 Layout em ``tmp_path``::
 
-    srv/projects/demo/{workspaces/pca,pcb, shared, history}   (Manager)
-    srv/manager/manager.db                                    (banco do Manager)
-    manager.json                                              (config do Manager)
-    pcA/{work,cache,state,mutagen-data,token}  pcA.json       (idem pcB)
-    admin.json + admin-token                                  (identidade admin)
-    sentinel/                                                 (não pode mudar)
+    mgr/srv/projects/demo/{workspaces/<conta>/tree, shared, history}   (Manager)
+    mgr/srv/manager/manager.db                                         (banco do Manager)
+    mgr/cfg/manager.json                                               (config version 2)
+    pcA/{home, work, cache}    pcB/{...}                               (Client de cada dev)
+    admin/{home, work, cache}                                          (só no rollback)
+    sentinel/                                                          (não pode mudar)
 
-O Manager roda como processo separado (``python -m tsm_manager serve``) numa porta livre
-de ``127.0.0.1``. Os comandos ``tsm`` rodam no processo do teste, como nos testes de transporte.
+O Manager roda como processo separado (``tsm-manager serve``, ``LocalProvisioner``,
+``transport: local``). O lado do Client é só o ``tsm``, com ``<home>`` próprio e endereço de
+loopback próprio por PC: ``tsm enroll`` com um convite e ``tsm bind`` (que roda o ``init``).
+O lado do operador (convites e aprovações com o fingerprint mostrado pelo ``enroll``) usa os
+serviços de domínio sobre o mesmo banco (``tests/identity_seed.py``), como a CLI do servidor.
 """
 
 from __future__ import annotations
 
 import hashlib
-import io
 import json
-import os
 import shutil
-import socket
 import subprocess
 import sys
-import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,24 +30,21 @@ from pathlib import Path
 import pytest
 
 from tests.conftest import REPO_ROOT
+from tests.identity.conftest import Pc as IdentityPc
+from tests.identity_seed import Seed
 from tests.integration.conftest import wait_until
+from tests.manager.server import Server
 from tsm_client.cli import default_collab, default_service
-from tsm_client.cli import run as cli_run
 from tsm_client.collab import CollabService
-from tsm_client.config import load_config
-from tsm_manager.auth import token_sha256
+from tsm_client.config import load_home_config
+from tsm_client.enroll import Toolkit
+from tsm_client.home import Home
+from tsm_manager.config import load_manager_config
+from tsm_manager.services import Manager
 
 DEMO = REPO_ROOT / "examples" / "demo-project"
 SPELLS = "data/scripts/spells.lua"
 CREATURES = "data/scripts/creatures.lua"
-
-
-def free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
 
 
 def tree_hash(root: Path) -> str:
@@ -61,79 +57,54 @@ def tree_hash(root: Path) -> str:
     return h.hexdigest()
 
 
-@dataclass
-class ManagerProc:
-    cfg_path: Path
-    port: int
-    env_extra: dict[str, str] = field(default_factory=dict)
-    proc: subprocess.Popen | None = None
-    log: Path | None = None
+class Pc(IdentityPc):
+    """Um PC de dev: ``<home>``, pasta de trabalho e cache próprios."""
 
-    @property
-    def url(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
-
-    def start(self, faults: dict | None = None) -> None:
-        env = dict(os.environ)
-        env.pop("TSM_MANAGER_FAULTS", None)
-        if faults:
-            env["TSM_MANAGER_FAULTS"] = json.dumps(faults)
-        self.log = self.cfg_path.parent / f"manager-{int(time.time() * 1000)}.log"
-        fh = open(self.log, "wb")  # noqa: SIM115 - fechado pelo processo filho/stop
-        self.proc = subprocess.Popen(
-            [sys.executable, "-m", "tsm_manager", "serve", "--config", str(self.cfg_path),
-             "--port", str(self.port)], stdout=fh, stderr=subprocess.STDOUT, env=env)
-        fh.close()
-
-        def up() -> bool:
-            if self.proc.poll() is not None:
-                raise AssertionError(f"Manager saiu: {self.log.read_text('utf-8', 'replace')}")
-            with socket.create_connection(("127.0.0.1", self.port), timeout=0.5):
-                return True
-
-        wait_until(up, 30, 0.2, "Manager no ar")
-
-    def stop(self) -> None:
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
-            try:
-                self.proc.wait(10)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
-                self.proc.wait(10)
-        self.proc = None
-
-    def restart(self, faults: dict | None = None) -> None:
-        self.stop()
-        self.start(faults)
-
-
-@dataclass
-class Pc:
-    name: str
-    root: Path
-    cfg_path: Path
-    binding: str
-
-    @property
-    def work(self) -> Path:
-        return self.root / "work"
+    def __init__(self, name: str, root: Path, n: int, srv: Server) -> None:
+        super().__init__(root, n, srv)
+        self.name = name
+        self.binding: str | None = None
+        self.device_id: str | None = None
 
     @property
     def cache(self) -> Path:
         return self.root / "cache"
 
-    def tsm(self, *args: str, expect: int | None = 0) -> tuple[int, str, str]:
-        out, err = io.StringIO(), io.StringIO()
-        code = cli_run(["--config", str(self.cfg_path), *args], out=out, err=err)
-        if expect is not None:
-            assert code == expect, (f"tsm {' '.join(args)} -> {code}\n{out.getvalue()}"
-                                    f"{err.getvalue()}")
-        return code, out.getvalue(), err.getvalue()
+    @property
+    def state_dir(self) -> Path:
+        return self.home / "state"
+
+    @property
+    def connection(self) -> dict:
+        assert self.binding, f"{self.name} sem vínculo"
+        return json.loads(Home(self.home).connection_file(self.binding).read_text("utf-8"))
+
+    @property
+    def workspace(self) -> Path:
+        """Raiz sincronizada no servidor (``workspaces/<conta>/tree``), vinda do ``bind``."""
+        return Path(self.connection["paths"]["workspace"])
+
+    def enroll(self, seed: Seed, code: str, display_name: str) -> None:
+        res = self.json("enroll", "--manager", self.url, "--invite", code, "--name",
+                        display_name)
+        assert res["status"] == "pending", res
+        self.device_id = res["device_id"]
+        seed.approve(res["device_id"], res["fingerprint"])
+
+    def bind(self, *extra: str, expect: int | None = 0) -> tuple[int, str, str]:
+        """``tsm bind`` da pasta e do cache do PC; roda o ``init`` se ainda não houver."""
+        r = self.tsm("bind", "--project", "demo", "--local", str(self.work), "--cache",
+                     str(self.cache), *extra, expect=expect)
+        if self.binding is None:
+            binding = json.loads(Home(self.home).config_path.read_text("utf-8"))["bindings"]
+            if binding:
+                self.binding = binding[0]["id"]
+        return r
 
     def collab(self) -> CollabService:
-        cfg = load_config(self.cfg_path)
-        return default_collab(cfg, default_service(cfg))
+        cfg = load_home_config(Home(self.home))
+        return default_collab(cfg, default_service(cfg),
+                              toolkit=Toolkit(transport=self.transport))
 
     def read(self, rel: str) -> bytes:
         return (self.work / rel).read_bytes()
@@ -149,18 +120,18 @@ class Pc:
         self.write(rel, data.replace(old, new, 1))
 
     def state(self) -> dict:
-        return json.loads((self.root / "state" / "bindings" / self.binding / "state.json")
+        return json.loads((self.state_dir / "bindings" / self.binding / "state.json")
                           .read_text("utf-8"))
 
 
 @dataclass
 class Collab:
     root: Path
-    manager: ManagerProc
-    project_dir: Path
+    manager: Server
+    seed: Seed
     pcs: dict[str, Pc]
-    admin_cfg: Path
     sentinel: Path
+    _admin: Pc | None = field(default=None)
 
     @property
     def a(self) -> Pc:
@@ -171,18 +142,21 @@ class Collab:
         return self.pcs["pcB"]
 
     @property
+    def project_dir(self) -> Path:
+        return self.manager.root / "projects" / "demo"
+
+    @property
     def shared(self) -> Path:
         return self.project_dir / "shared"
 
-    def workspace(self, device: str) -> Path:
-        return self.project_dir / "workspaces" / device
-
     def admin(self, *args: str, expect: int | None = 0) -> tuple[int, str, str]:
-        out, err = io.StringIO(), io.StringIO()
-        code = cli_run(["--config", str(self.admin_cfg), *args], out=out, err=err)
-        if expect is not None:
-            assert code == expect, f"{code}\n{out.getvalue()}{err.getvalue()}"
-        return code, out.getvalue(), err.getvalue()
+        """Admin do projeto, criado no primeiro uso: bootstrap, cadastro, aprovação e vínculo."""
+        if self._admin is None:
+            pc = Pc("admin", self.root / "admin", 3, self.manager)
+            pc.enroll(self.seed, self.seed.bootstrap_invite(), "admin")
+            pc.bind()
+            self._admin = pc
+        return self._admin.tsm(*args, expect=expect)
 
     def main_files(self) -> dict[str, bytes]:
         from tsm_manager.adapters.git import Git
@@ -193,87 +167,41 @@ class Collab:
 
     def verify(self) -> None:
         out = subprocess.run([sys.executable, "-m", "tsm_manager", "verify", "--config",
-                              str(self.manager.cfg_path)], capture_output=True, text=True,
+                              str(self.manager.cfg)], capture_output=True, text=True,
                              encoding="utf-8")
         assert out.returncode == 0, out.stdout + out.stderr
 
-
-def _client_cfg(pc_root: Path, exe: Path, binding: str, device: str, project_dir: Path,
-                url: str, token_file: Path) -> dict:
-    return {
-        "version": 2, "device_id": device,
-        "mutagen": {"data_directory": str(pc_root / "mutagen-data"), "executable": str(exe)},
-        "state_directory": str(pc_root / "state"),
-        "manager": {"url": url, "token_file": str(token_file)},
-        "bindings": [{
-            "id": binding, "project_id": "demo",
-            "local": str(pc_root / "work"), "cache": str(pc_root / "cache"),
-            "workspace": str(project_dir / "workspaces" / device),
-            "shared": str(project_dir / "shared"),
-            "rules": {"allow": [], "ignore": []},
-        }],
-    }
-
-
-def make_collab(tmp_path: Path, exe: Path, *, test_faults: bool = True) -> Collab:
-    tokens = {"pca": "token-pca", "pcb": "token-pcb", "admin": "token-admin"}
-    mcfg = {
-        "version": 1, "root": "srv", "test_faults": test_faults,
-        "projects": [{"id": "demo", "bindings": [
-            {"id": "demo-pca", "device": "pca", "workspace": "pca"},
-            {"id": "demo-pcb", "device": "pcb", "workspace": "pcb"}]}],
-        "identities": [
-            {"name": "dev-a", "role": "developer", "device": "pca",
-             "token_sha256": token_sha256(tokens["pca"])},
-            {"name": "dev-b", "role": "developer", "device": "pcb",
-             "token_sha256": token_sha256(tokens["pcb"])},
-            {"name": "admin", "role": "admin", "token_sha256": token_sha256(tokens["admin"])},
-        ],
-    }
-    cfg_path = tmp_path / "manager.json"
-    cfg_path.write_text(json.dumps(mcfg, indent=1), encoding="utf-8")
-    for cmd in (["migrate"], ["init-project", "--project", "demo", "--from", str(DEMO)]):
-        r = subprocess.run([sys.executable, "-m", "tsm_manager", cmd[0], "--config",
-                            str(cfg_path), *cmd[1:]],
-                           capture_output=True, text=True, encoding="utf-8")
-        assert r.returncode == 0, r.stdout + r.stderr
-    project_dir = tmp_path / "srv" / "projects" / "demo"
-    manager = ManagerProc(cfg_path, free_port())
-
-    pcs = {}
-    for name, device in (("pcA", "pca"), ("pcB", "pcb")):
-        root = tmp_path / name
-        root.mkdir()
-        tok = root / "token"
-        tok.write_text(tokens[device], encoding="utf-8")
-        cfg = _client_cfg(root, exe, f"demo-{device}", device, project_dir, manager.url, tok)
-        p = tmp_path / f"{name}.json"
-        p.write_text(json.dumps(cfg, indent=1), encoding="utf-8")
-        pcs[name] = Pc(name, root, p, f"demo-{device}")
-    admin_tok = tmp_path / "admin-token"
-    admin_tok.write_text(tokens["admin"], encoding="utf-8")
-    admin = json.loads(pcs["pcA"].cfg_path.read_text("utf-8"))
-    admin["manager"]["token_file"] = str(admin_tok)
-    admin_cfg = tmp_path / "admin.json"
-    admin_cfg.write_text(json.dumps(admin), encoding="utf-8")
-    sentinel = tmp_path / "sentinel"
-    sentinel.mkdir()
-    (sentinel / "secret.txt").write_text("intocado\n", encoding="utf-8")
-    return Collab(tmp_path, manager, project_dir, pcs, admin_cfg, sentinel)
+    def all_pcs(self) -> list[Pc]:
+        return [*self.pcs.values(), *([self._admin] if self._admin else [])]
 
 
 @pytest.fixture
 def collab(tmp_path: Path, mutagen_exe: Path) -> Iterator[Collab]:
-    env = make_collab(tmp_path, mutagen_exe)
-    env.manager.start()
-    sentinel_before = tree_hash(env.sentinel)
+    """Manager no ar e os dois PCs cadastrados e aprovados, ainda sem vínculo."""
+    srv = Server(tmp_path / "mgr", test_faults=True, projects=("demo",))
+    srv.cli("migrate")
+    srv.cli("init-project", "--project", "demo", "--from", str(DEMO))
+    srv.start()
+    operator = Manager(load_manager_config(srv.cfg))
+    seed = Seed(operator.identity, tmp_path / "keys")
+    sentinel = tmp_path / "sentinel"
+    sentinel.mkdir()
+    (sentinel / "secret.txt").write_text("intocado\n", encoding="utf-8")
+    env = Collab(tmp_path, srv, seed, {}, sentinel)
+    sentinel_before = tree_hash(sentinel)
     try:
+        for name, n, who in (("pcA", 1, "dev-a"), ("pcB", 2, "dev-b")):
+            pc = Pc(name, tmp_path / name, n, srv)
+            pc.enroll(seed, seed.invite(), who)
+            env.pcs[name] = pc
         yield env
     finally:
-        for pc in env.pcs.values():
-            with _suppress():
-                pc.tsm("teardown", "--stop-daemon", expect=None)
-        env.manager.stop()
+        for pc in env.all_pcs():
+            if (pc.home / "config.json").exists():
+                with _suppress():
+                    pc.tsm("teardown", "--stop-daemon", expect=None)
+        srv.stop()
+        operator.close()
     assert tree_hash(env.sentinel) == sentinel_before
     for pc in env.pcs.values():  # temporários do pull nunca ficam na pasta
         if pc.work.exists():
@@ -282,9 +210,9 @@ def collab(tmp_path: Path, mutagen_exe: Path) -> Iterator[Collab]:
 
 @pytest.fixture
 def ready(collab: Collab) -> Collab:
-    """Os dois PCs inicializados."""
+    """Os dois PCs vinculados (e por isso inicializados)."""
     for pc in collab.pcs.values():
-        pc.tsm("init")
+        pc.bind()
     return collab
 
 
@@ -298,7 +226,7 @@ class _suppress:
 
 def wait_workspace(env: Collab, pc: Pc, rel: str, data: bytes | None,
                    timeout: float = 30) -> None:
-    ws = env.workspace("pca" if pc.name == "pcA" else "pcb") / rel
+    ws = pc.workspace / rel
 
     def check() -> bool:
         if data is None:

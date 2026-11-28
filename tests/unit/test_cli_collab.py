@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import io
-import json
 
 import pytest
 
+from tests.transport_config import BindingSpec, transport_config
 from tsm_client.adapters.manager import ManagerUnavailable, Response
 from tsm_client.cli import (
     EXIT_CONFIG,
@@ -55,20 +55,14 @@ class FakeCollab:
 
 @pytest.fixture
 def env(tmp_path):
-    cfg = {
-        "version": 2, "device_id": "pca",
-        "mutagen": {"data_directory": "m", "executable": str(tmp_path / "m.exe")},
-        "state_directory": "st", "manager": {"url": "http://127.0.0.1:1", "token_file": "t"},
-        "bindings": [{"id": "demo-pca", "project_id": "demo", "local": "w", "cache": "c",
-                      "workspace": "srv/ws", "shared": "srv/sh"}],
-    }
-    path = tmp_path / "c.json"
-    path.write_text(json.dumps(cfg), encoding="utf-8")
+    cfg = transport_config(tmp_path, device_id="pca", data_directory="m",
+                           executable=tmp_path / "m.exe",
+                           bindings=[BindingSpec("demo-pca", "w", "c", "srv/ws", "srv/sh")])
     fake = FakeCollab()
 
     def call(*args):
         out, err = io.StringIO(), io.StringIO()
-        code = run(["--config", str(path), *args], service_factory=lambda c: object(),
+        code = run(list(args), config=cfg, service_factory=lambda c: object(),
                    collab_factory=lambda c, s: fake, out=out, err=err)
         return code, out.getvalue(), err.getvalue()
 
