@@ -14,8 +14,10 @@ dispositivo inteiro e devolve o vínculo e o ``Requester``.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 from tests.sshsig_signer import SigningDevice, keygen_path
@@ -57,6 +59,16 @@ class Seed:
     @property
     def ctx(self):
         return self.ids.ctx
+
+    def shifted(self, seconds: float) -> Seed:
+        """A mesma semente com o relógio deslocado (negativo = passado).
+
+        Serve para gravar registros que o Manager em execução já vê vencidos (um desafio
+        emitido há mais que o TTL), sem esperar o tempo passar.
+        """
+        base = self.ctx.clock
+        ctx = dataclasses.replace(self.ctx, clock=lambda: base() + timedelta(seconds=seconds))
+        return Seed(dataclasses.replace(self.ids, ctx=ctx), self.keys)
 
     def bootstrap_invite(self, project: str = "demo") -> str:
         return invites.create_bootstrap(self.ctx, OPERATOR, project_id=project).code

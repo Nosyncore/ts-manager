@@ -49,7 +49,8 @@ class Pc:
         self.home = root / "home"
         self.n = n
         self.srv = srv
-        self.transport = SourceTransport(f"127.0.0.{20 + n}")
+        self.source = f"127.0.0.{20 + n}"
+        self.transport = SourceTransport(self.source)
 
     @property
     def url(self) -> str:

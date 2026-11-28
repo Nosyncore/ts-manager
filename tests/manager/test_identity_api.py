@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import subprocess
 import sys
 import uuid
@@ -18,11 +17,14 @@ from pathlib import Path
 
 import pytest
 
-from tests.manager.conftest import DEMO
+from tests.identity_seed import Seed
 from tests.manager.identity_http import Device, Http
 from tests.manager.server import Server, free_port, write_config
 from tsm_common import protocol as P
 from tsm_common.rules import ProjectRules, rules_digest
+from tsm_manager.config import load_manager_config
+from tsm_manager.identity import challenges
+from tsm_manager.services import Manager
 
 pytestmark = pytest.mark.integration
 
@@ -33,16 +35,20 @@ SPELLS = "data/scripts/spells.lua"
 def srv(tmp_path_factory):
     s = Server(tmp_path_factory.mktemp("identity"))
     s.cli("migrate")
-    s.cli("init-project", "--project", "demo", "--from", str(DEMO))
-    other = s.tmp / "outro-src"
-    shutil.copytree(DEMO, other)
-    (other / "ts-project.json").write_text(json.dumps({"project_id": "outro", "version": 1}),
-                                           encoding="utf-8")
-    s.cli("init-project", "--project", "outro", "--from", str(other))
+    s.init_project("demo")
+    s.init_project("outro")
     s.start()
     s.devices = {}
     yield s
     s.stop()
+
+
+@pytest.fixture(scope="module")
+def seed(srv, tmp_path_factory):
+    """O operador sobre o banco do Manager em execução (serviços de domínio)."""
+    operator = Manager(load_manager_config(srv.cfg))
+    yield Seed(operator.identity, tmp_path_factory.mktemp("seed-keys"))
+    operator.close()
 
 
 def approve(admin: Device, dev: Device) -> None:
@@ -160,6 +166,24 @@ def test_replay_and_wrong_signatures(srv):
     r = dev_a.http.post("/auth/verify", {"challenge_id": ch["challenge_id"],
                                          "signature": other_server})
     assert r.status == 401 and r.code == P.UNAUTHORIZED
+
+
+def test_expired_challenge_is_refused(srv, seed):
+    """Desafio emitido há mais que o TTL (60 s): a assinatura válida não serve mais."""
+    admin = srv.devices["admin"]
+    before = len(srv.audit("auth_refused"))
+
+    def verify(issued: challenges.IssuedChallenge):
+        return admin.http.post("/auth/verify", {"challenge_id": issued.challenge_id,
+                                                "signature": admin.signer.sign(issued.message())})
+
+    fresh = verify(challenges.issue_login(seed.ctx, admin.fingerprint))
+    assert fresh.status == 200 and fresh.body["scope"] == "full"  # controle: o mesmo caminho
+    expired = verify(challenges.issue_login(seed.shifted(-120).ctx, admin.fingerprint))
+    assert expired.status == 401 and expired.code == P.UNAUTHORIZED
+    assert "token" not in expired.body
+    refused = srv.audit("auth_refused")[before:]
+    assert [(e["step"], e["purpose"]) for e in refused] == [("challenge", "login")]
 
 
 def test_invite_errors_are_generic_and_audited(srv):

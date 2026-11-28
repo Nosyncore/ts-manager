@@ -264,7 +264,10 @@ def test_rollback(ready: Collab):
     a.tsm("publish", SPELLS)
     b.tsm("pull")
     b.edit(CREATURES, b"health = 20", b"health = 23")  # local, não publicado
-    a.tsm("rollback", "r1", "--confirm", expect=3)  # dev não é admin
+    _, _, err = a.tsm("rollback", "r1", "--confirm", expect=3)  # dev não é admin
+    assert "forbidden" in err
+    _, _, err = a.tsm("audit", "--limit", "5", expect=3)  # auditoria também é só do admin
+    assert "HTTP 403" in err
     _, out, _ = ready.admin("rollback", "r1", "--confirm", "-m", "volta")
     assert "rollback: r3" in out
     _, out, _ = b.tsm("pull")

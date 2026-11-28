@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -18,10 +19,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+from tests.conftest import REPO_ROOT
 from tests.integration.conftest import wait_until
 from tests.manager.identity_http import KEYGEN, Device, Http
 from tests.sshsig_signer import generate_key
 from tsm_manager.db import Database
+
+DEMO = REPO_ROOT / "examples" / "demo-project"
 
 
 def free_port() -> int:
@@ -52,11 +56,11 @@ def write_config(tmp: Path, root: Path, *, keygen: Path = KEYGEN, test_faults: b
 
 class Server:
     def __init__(self, tmp: Path, *, test_faults: bool = False,
-                 projects: tuple[str, ...] = ("demo", "outro")) -> None:
+                 projects: tuple[str, ...] = ("demo", "outro"), port: int | None = None) -> None:
         self.tmp = tmp
         self.root = tmp / "srv"
         self.cfg = write_config(tmp, self.root, test_faults=test_faults, projects=projects)
-        self.port = free_port()
+        self.port = port or free_port()  # port: a mesma de outro Manager (troca de servidor)
         self.proc: subprocess.Popen | None = None
         self.log = tmp / "serve.log"
 
@@ -74,6 +78,17 @@ class Server:
                            timeout=300)
         assert r.returncode in ok, f"{args}: {r.returncode}\n{r.stdout}{r.stderr}"
         return r
+
+    def init_project(self, project: str = "demo") -> None:
+        """``init-project`` a partir do projeto de exemplo, com o ``project_id`` pedido."""
+        src = DEMO
+        if project != "demo":
+            src = self.tmp / f"{project}-src"
+            if not src.exists():
+                shutil.copytree(DEMO, src)
+                (src / "ts-project.json").write_text(
+                    json.dumps({"project_id": project, "version": 1}), encoding="utf-8")
+        self.cli("init-project", "--project", project, "--from", str(src))
 
     def start(self, faults: dict[str, Any] | None = None) -> None:
         env = dict(os.environ)
@@ -111,12 +126,15 @@ class Server:
     def device(self, n: int, name: str) -> Device:
         return Device.create(self.port, self.tmp / "pcs" / f"pc{n}", n, name)
 
-    def audit(self, event: str) -> list[dict]:
+    def rows(self, sql: str, params: tuple = ()) -> list[dict]:
+        """Consulta de leitura no banco do Manager (o teste nunca escreve nele)."""
         db = Database(self.database)
         try:
             with db.read() as conn:
-                rows = conn.execute("SELECT fields FROM audit_logs WHERE event = ? ORDER BY id",
-                                    (event,)).fetchall()
+                return [dict(r) for r in conn.execute(sql, params).fetchall()]
         finally:
             db.close()
+
+    def audit(self, event: str) -> list[dict]:
+        rows = self.rows("SELECT fields FROM audit_logs WHERE event = ? ORDER BY id", (event,))
         return [json.loads(r["fields"]) for r in rows]
